@@ -136,3 +136,6 @@ hr{border:0;border-top:1px dashed #cbbf9f;margin:14px 0}
 .dt2 input{min-width:0;padding-left:8px;padding-right:6px}
 input[type=date],input[type=time]{-webkit-appearance:none;appearance:none;display:block}
 body.full #toast{bottom:auto;top:calc(56px + var(--safe-t))}
+.ledger::before{left:66px}
+.lrow .tm{width:52px;font-size:12.5px}
+.lday,.lpull{padding-left:78px}
