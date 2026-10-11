@@ -98,13 +98,13 @@
   var P = [];         // photo records (with thumb Blobs)
   var PI = {};        // id -> photo
   function defaults() {
-    return { schema: SCHEMA, cameras: [], deer: [], pulls: [], settings: { lat: null, lng: null, shootMin: 30, gapMin: 20, license: null, deviceId: null, lastBackup: null, lastCam: null, installDismissed: false, createdAt: Date.now() } };
+    return { schema: SCHEMA, cameras: [], deer: [], pulls: [], map: null, settings: { lat: null, lng: null, shootMin: 30, gapMin: 20, license: null, deviceId: null, lastBackup: null, lastCam: null, installDismissed: false, createdAt: Date.now() } };
   }
   function num(v, lo, hi, def) { v = Number(v); return (v !== null && v !== '' && isFinite(v) && v >= lo && v <= hi) ? v : def; }
   function migrate(s) {
     var d = defaults();
     if (!s || typeof s !== 'object') return d;
-    var out = { schema: SCHEMA, cameras: [], deer: [], pulls: [], settings: d.settings };
+    var out = { schema: SCHEMA, cameras: [], deer: [], pulls: [], map: null, settings: d.settings };
     var st = (s.settings && typeof s.settings === 'object') ? s.settings : {};
     ['license', 'deviceId', 'lastBackup', 'lastCam', 'installDismissed', 'createdAt'].forEach(function (k) { if (st[k] !== undefined) out.settings[k] = st[k]; });
     out.settings.lat = (st.lat === null || st.lat === undefined || st.lat === '') ? null : num(st.lat, -90, 90, null);
@@ -130,6 +130,13 @@
     });
     var L = out.settings.license;
     if (L && (typeof L !== 'object' || (L.ok && (!L.source || (L.source === 'dev' && !C.DEV_MODE))))) out.settings.license = null;
+    L = out.settings.license;
+    if (L && L.ok) {
+      if (L.tier !== 'elite' && L.tier !== 'pro') L.tier = 'pro';
+      if (L.upgrade && (typeof L.upgrade !== 'object' || !L.upgrade.key)) L.upgrade = null;
+      if (L.tier === 'elite' && L.source === 'gumroad' && !L.upgrade && !L.product) L.tier = 'pro';
+    }
+    out.map = (window.BuckSim && s.map) ? window.BuckSim.clean(s.map) : null;
     return out;
   }
   function cleanPhoto(p, camIds, deerIds) {
@@ -272,13 +279,35 @@
     return hm(toS) + (toS < 0 ? ' before' : ' after') + ' sunset (' + fmtTime(st.set) + ')';
   }
   var LIGHT_LABEL = { day: 'Daylight', light: 'Shooting light', dark: 'Dark' };
-  /* ---------------- Pro / license key (Gumroad, same approach as Rowbin) ---------------- */
+  /* ---------------- License tiers: Free / Pro / Elite (Gumroad one-time keys) ----------------
+   * Option A: ONE Gumroad product (GUMROAD_PRODUCT_ID) with versions named "Pro", "Elite", "Elite Upgrade".
+   *           The version comes back in the verify reply as purchase.variants.
+   * Option B: separate products (PRO_PRODUCT_ID / ELITE_PRODUCT_ID / UPGRADE_PRODUCT_ID).
+   * An Elite Upgrade key only unlocks Elite when this phone already holds a valid Pro key (both re-checked). */
   function maskKey(k) { k = String(k || ''); return k.length > 8 ? k.slice(0, 4) + '…' + k.slice(-4) : k; }
-  function isPro() { return !!(S.settings.license && S.settings.license.ok); }
+  function tier() { var L = S.settings.license; return L && L.ok ? (L.tier === 'elite' ? 'elite' : 'pro') : 'free'; }
+  function isPro() { return tier() !== 'free'; }
+  function isElite() { return tier() === 'elite'; }
+  var TIER_NAME = { free: 'Free', pro: 'Pro', elite: 'Elite' };
   function normCode(c) { return String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
-  function proOnSale() { return !!C.GUMROAD_PRODUCT_ID; }
-  function camLimit() { return isPro() ? 0 : (C.FREE_CAMERA_LIMIT || 0); }
-  function buckLimit() { return isPro() ? 0 : (C.FREE_BUCK_LIMIT || 0); }
+  function products() {   // [{id, kind}] in the order keys are tried
+    var out = [];
+    if (C.GUMROAD_PRODUCT_ID) out.push({ id: C.GUMROAD_PRODUCT_ID, kind: 'versions' });
+    if (C.ELITE_PRODUCT_ID) out.push({ id: C.ELITE_PRODUCT_ID, kind: 'elite' });
+    if (C.PRO_PRODUCT_ID) out.push({ id: C.PRO_PRODUCT_ID, kind: 'pro' });
+    if (C.UPGRADE_PRODUCT_ID) out.push({ id: C.UPGRADE_PRODUCT_ID, kind: 'upgrade' });
+    return out;
+  }
+  function proOnSale() { return products().length > 0; }
+  function tierOnSale(t) { return !!(C.GUMROAD_PRODUCT_ID || C[{ pro: 'PRO', elite: 'ELITE', upgrade: 'UPGRADE' }[t] + '_PRODUCT_ID']); }
+  function checkoutFor(t) {
+    var own = C[{ pro: 'PRO', elite: 'ELITE', upgrade: 'UPGRADE' }[t] + '_CHECKOUT_URL'];
+    if (own && tierOnSale(t)) return own;
+    return C.GUMROAD_PRODUCT_ID && C.CHECKOUT_URL ? C.CHECKOUT_URL : '';
+  }
+  function priceOf(t) { return C[{ pro: 'PRO', elite: 'ELITE', upgrade: 'UPGRADE' }[t] + '_PRICE'] || ''; }
+  function camLimit() { var t = tier(); return t === 'elite' ? 0 : t === 'pro' ? (C.PRO_CAMERA_LIMIT || 0) : (C.FREE_CAMERA_LIMIT || 0); }
+  function buckLimit() { var t = tier(); return t === 'elite' ? 0 : t === 'pro' ? (C.PRO_BUCK_LIMIT || 0) : (C.FREE_BUCK_LIMIT || 0); }
   function canAddCam() { var l = camLimit(); return !l || S.cameras.length < l; }
   function canAddBuck() { var l = buckLimit(); return !l || S.deer.length < l; }
   function sha256Hex(str) {
@@ -291,9 +320,9 @@
   }
   function deviceId() { if (!S.settings.deviceId) { S.settings.deviceId = uid() + uid(); save(); } return S.settings.deviceId; }
   function supportLine() { return ' For help, contact the seller through your Gumroad receipt.'; }
-  function gumroadVerify(key, increment) {
+  function gumroadVerify(productId, key, increment) {
     var body = new URLSearchParams();
-    body.set('product_id', C.GUMROAD_PRODUCT_ID || '');
+    body.set('product_id', productId || '');
     body.set('license_key', key);
     body.set('increment_uses_count', increment ? 'true' : 'false');
     var ctrl = window.AbortController ? new AbortController() : null;
@@ -302,20 +331,45 @@
       .then(function (r) { clearTimeout(to); return r.json().catch(function () { return { success: false, message: 'Unexpected reply from Gumroad (HTTP ' + r.status + ').', _http: r.status }; }).then(function (j) { j._http = r.status; return j; }); })
       .catch(function (e) { clearTimeout(to); return { _network: true, message: String(e && e.message || e) }; });
   }
-  function judge(j) {
-    if (!j || j._network) return { state: 'network', msg: 'Couldn’t reach Gumroad. Connect to the internet once to activate your key, then Pro works offline.' };
+  function variantTier(v) {
+    v = String(v || '').toLowerCase();
+    if (/upgrade/.test(v)) return 'upgrade';
+    if (/elite/.test(v)) return 'elite';
+    if (/\bpro\b/.test(v)) return 'pro';
+    return null;
+  }
+  function judge(j, prod) {
+    if (!j || j._network) return { state: 'network', msg: 'Couldn’t reach Gumroad. Connect to the internet once to activate your key; after that it works offline.' };
     if (!j.success) {
       if (j._http >= 500) return { state: 'network', msg: 'Gumroad is having trouble right now. Please try again in a few minutes.' };
       var m = String(j.message || '');
-      var disabled = /disabled|revoked/i.test(m);
-      return { state: disabled ? 'revoked' : 'invalid', msg: (disabled ? 'This license key has been disabled.' : 'That key wasn’t recognized for ' + APP + ' Pro. Check it against your Gumroad receipt.') + supportLine() };
+      if (/disabled|revoked/i.test(m)) return { state: 'revoked', msg: 'This license key has been disabled.' + supportLine() };
+      return { state: 'invalid', msg: 'That key wasn’t recognized for ' + APP + '. Check it against your Gumroad receipt.' + supportLine() };
     }
     var pu = j.purchase || {};
-    if (pu.refunded) return { state: 'revoked', msg: 'This purchase was refunded, so the key no longer unlocks Pro.' + supportLine() };
-    if (pu.chargebacked || (pu.disputed && !pu.dispute_won)) return { state: 'revoked', msg: 'This purchase was disputed or charged back, so the key no longer unlocks Pro.' + supportLine() };
+    if (pu.refunded) return { state: 'revoked', msg: 'This purchase was refunded, so the key no longer unlocks anything.' + supportLine() };
+    if (pu.chargebacked || (pu.disputed && !pu.dispute_won)) return { state: 'revoked', msg: 'This purchase was disputed or charged back, so the key no longer unlocks anything.' + supportLine() };
     if (pu.subscription_ended_at || pu.subscription_cancelled_at || pu.subscription_failed_at) return { state: 'revoked', msg: 'This purchase is no longer active.' + supportLine() };
-    if (C.GUMROAD_PRODUCT_ID && pu.product_id && pu.product_id !== C.GUMROAD_PRODUCT_ID) return { state: 'invalid', msg: 'That key belongs to a different product.' };
-    return { state: 'valid', uses: typeof j.uses === 'number' ? j.uses : null, sale: pu.sale_id || pu.id || null, test: !!pu.test };
+    if (prod && pu.product_id && pu.product_id !== prod.id) return { state: 'invalid', msg: 'That key belongs to a different product.' };
+    var t = prod && prod.kind !== 'versions' ? prod.kind : variantTier(pu.variants);
+    // A versions product where the version can't be read: grant the lowest paid tier, never more.
+    var guessed = false; if (!t) { t = 'pro'; guessed = true; }
+    return { state: 'valid', tier: t, guessed: guessed, uses: typeof j.uses === 'number' ? j.uses : null, sale: pu.sale_id || pu.id || null, product: prod ? prod.id : null };
+  }
+  // Try each configured product until one recognizes the key (or says it was refunded/disabled).
+  function verifyAny(key, increment, onlyProduct) {
+    var list = products().filter(function (p) { return !onlyProduct || p.id === onlyProduct; }), i = 0, firstBad = null;
+    function next() {
+      if (i >= list.length) return Promise.resolve(firstBad || { state: 'invalid', msg: 'That key wasn’t recognized for ' + APP + '. Check it against your Gumroad receipt.' + supportLine() });
+      var prod = list[i++];
+      return gumroadVerify(prod.id, key, increment).then(function (j) {
+        var r = judge(j, prod);
+        if (r.state === 'valid' || r.state === 'revoked' || r.state === 'network') return r;
+        if (!firstBad) firstBad = r;
+        return next();
+      });
+    }
+    return next();
   }
   function devUnlock(n) {
     if (!C.DEV_MODE) return Promise.resolve(false);
@@ -325,36 +379,64 @@
     var key = String(code || '').trim(), n = normCode(key);
     if (n.length < 4) return Promise.resolve({ ok: false, msg: 'Please enter your license key.' });
     return devUnlock(n).then(function (isDev) {
-      if (isDev) { S.settings.license = { ok: true, key: key.toUpperCase(), at: Date.now(), source: 'dev', verifiedAt: Date.now() }; flush(); return { ok: true, msg: 'Dev unlock (DEV_MODE is on).' }; }
-      if (!C.GUMROAD_PRODUCT_ID) return { ok: false, msg: 'Pro isn’t on sale yet, so keys can’t be checked. Please check back soon.' };
-      if (navigator.onLine === false) return { ok: false, msg: 'You’re offline. Connect to the internet once to activate your key; after that Pro works offline.' };
+      if (isDev) { S.settings.license = { ok: true, tier: 'elite', key: key.toUpperCase(), at: Date.now(), source: 'dev', verifiedAt: Date.now() }; flush(); return { ok: true, msg: 'Dev unlock: Elite (DEV_MODE is on).' }; }
+      if (!proOnSale()) return { ok: false, msg: 'Pro and Elite aren’t on sale yet, so keys can’t be checked. Please check back soon.' };
+      if (navigator.onLine === false) return { ok: false, msg: 'You’re offline. Connect to the internet once to activate your key; after that it works offline.' };
       var cur = S.settings.license;
-      var sameDevice = cur && cur.ok && cur.source === 'gumroad' && normCode(cur.key) === n;
-      return gumroadVerify(key, !sameDevice).then(function (j) {
-        var r = judge(j);
+      var sameMain = cur && cur.ok && cur.source === 'gumroad' && normCode(cur.key) === n;
+      var sameUp = cur && cur.ok && cur.upgrade && normCode(cur.upgrade.key) === n;
+      return verifyAny(key, !(sameMain || sameUp)).then(function (r) {
         if (r.state !== 'valid') {
-          if (r.state === 'revoked' && sameDevice) { S.settings.license = null; save(); }
+          if (r.state === 'revoked' && sameMain) { S.settings.license = null; flush(); }
+          else if (r.state === 'revoked' && sameUp) { cur.tier = 'pro'; cur.upgrade = null; flush(); }
           return { ok: false, msg: r.msg };
         }
         var max = C.MAX_ACTIVATIONS || 0;
-        if (!sameDevice && max && r.uses !== null && r.uses > max) {
-          return { ok: false, msg: 'This key has already been activated on ' + r.uses + ' devices (limit ' + max + '). If you got a new phone, ' + 'contact the seller through your Gumroad receipt to reset it.' };
+        if (!(sameMain || sameUp) && max && r.uses !== null && r.uses > max) {
+          return { ok: false, msg: 'This key has already been activated on ' + r.uses + ' devices (limit ' + max + '). If you got a new phone, contact the seller through your Gumroad receipt to reset it.' };
         }
-        S.settings.license = { ok: true, key: key.toUpperCase(), at: (sameDevice && cur.at) || Date.now(), source: 'gumroad', verifiedAt: Date.now(), uses: r.uses, sale: r.sale, device: deviceId() };
+        if (r.tier === 'upgrade') return applyUpgrade(key, r);
+        var keepUp = sameMain && cur.upgrade && r.tier === 'pro' ? cur.upgrade : null;
+        S.settings.license = { ok: true, tier: keepUp ? 'elite' : r.tier, key: key.toUpperCase(), at: (sameMain && cur.at) || Date.now(), source: 'gumroad', verifiedAt: Date.now(), uses: r.uses, sale: r.sale, product: r.product, device: deviceId(), upgrade: keepUp };
         flush();
-        return { ok: true, msg: sameDevice ? 'Key re-checked. Pro is active.' : 'Pro unlocked. Good luck this season! 🦌' };
+        if (sameMain) return { ok: true, msg: 'Key re-checked. ' + TIER_NAME[tier()] + ' is active.' };
+        return { ok: true, msg: (r.tier === 'elite' ? 'Elite unlocked: unlimited cameras and bucks, plus the Movement Simulator.' : 'Pro unlocked: ' + C.PRO_CAMERA_LIMIT + ' cameras and ' + C.PRO_BUCK_LIMIT + ' named bucks.') + (r.guessed ? ' (Couldn’t read the version on this key, so it unlocked Pro. If you bought Elite, contact the seller through your Gumroad receipt.)' : '') + ' Good luck this season! 🦌' };
       });
+    });
+  }
+  // Elite Upgrade: valid only on top of a valid Pro key on this phone. Re-check the Pro key right now too.
+  function applyUpgrade(upKey, ru) {
+    var cur = S.settings.license;
+    if (!cur || !cur.ok || cur.source !== 'gumroad' || cur.tier === 'elite' && !cur.upgrade) {
+      if (cur && cur.ok && cur.tier === 'elite' && !cur.upgrade) return Promise.resolve({ ok: false, msg: 'Elite is already unlocked on this phone. The upgrade key isn’t needed.' });
+      return Promise.resolve({ ok: false, msg: 'That’s an Elite Upgrade key. It works on top of a Pro key: enter your Pro key first, then this upgrade key.' });
+    }
+    return verifyAny(cur.key, false, cur.product || null).then(function (rp) {
+      if (rp.state === 'network') return { ok: false, msg: rp.msg };
+      if (rp.state !== 'valid' || rp.tier !== 'pro') {
+        if (rp.state === 'revoked') { S.settings.license = { ok: false, key: cur.key, revokedAt: Date.now(), reason: rp.msg }; flush(); }
+        return { ok: false, msg: 'The upgrade needs a valid Pro key on this phone, and your Pro key didn’t check out. ' + (rp.msg || '') };
+      }
+      cur.verifiedAt = Date.now(); cur.tier = 'elite';
+      cur.upgrade = { key: upKey.toUpperCase(), product: ru.product, verifiedAt: Date.now(), uses: ru.uses, sale: ru.sale };
+      flush();
+      return { ok: true, msg: 'Upgraded to Elite: unlimited cameras and bucks, plus the Movement Simulator.' };
     });
   }
   function recheckLicense() {
     var L = S.settings.license, days = C.RECHECK_DAYS;
-    if (!L || !L.ok || L.source !== 'gumroad' || !days || !C.GUMROAD_PRODUCT_ID || navigator.onLine === false) return Promise.resolve(null);
+    if (!L || !L.ok || L.source !== 'gumroad' || !days || !proOnSale() || navigator.onLine === false) return Promise.resolve(null);
     if (L.verifiedAt && Date.now() - L.verifiedAt < days * DAYMS) return Promise.resolve(null);
-    return gumroadVerify(L.key, false).then(function (j) {
-      var r = judge(j);
-      if (r.state === 'valid') { L.verifiedAt = Date.now(); if (r.uses !== null) L.uses = r.uses; save(); }
-      else if (r.state === 'revoked') { S.settings.license = { ok: false, key: L.key, revokedAt: Date.now(), reason: r.msg }; save(); render(); toast(r.msg, 6000); }
-      return r.state;
+    return verifyAny(L.key, false, L.product || null).then(function (r) {
+      if (r.state === 'revoked') { S.settings.license = { ok: false, key: L.key, revokedAt: Date.now(), reason: r.msg }; save(); render(); toast(r.msg, 6000); return r.state; }
+      if (r.state !== 'valid') return r.state;
+      L.verifiedAt = Date.now(); if (r.uses !== null) L.uses = r.uses; save();
+      if (!L.upgrade) return 'valid';
+      return verifyAny(L.upgrade.key, false, L.upgrade.product || null).then(function (u) {
+        if (u.state === 'revoked') { L.tier = 'pro'; L.upgrade = null; save(); render(); toast('Your Elite Upgrade is no longer active, so this phone is back to Pro.', 6000); }
+        else if (u.state === 'valid') { L.upgrade.verifiedAt = Date.now(); save(); }
+        return u.state;
+      });
     });
   }
 
@@ -533,6 +615,7 @@
   function render() {
     if (!S) return;
     R = parseHash();
+    if (simApi) { simApi.destroy(); simApi = null; }
     var v = VIEWS[R.view] || VIEWS.ledger, html;
     try { html = v(); } catch (e) { if (window.console) console.error(e); html = '<div class="panel">Something went wrong showing this screen. <a href="#/">Back to the Ledger</a></div>'; }
     $('#app').innerHTML = v.full ? html : '<main class="wrap">' + html + '</main>';
@@ -547,13 +630,14 @@
     sort: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M6 20h4M14 20h4"/></svg>',
     bucks: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3c-2 2-2 5 0 7M16 3c2 2 2 5 0 7M8 10c1 1 2 1.5 4 1.5s3-.5 4-1.5M9 12c0 4 1.3 8 3 8s3-4 3-8"/></svg>',
     cams: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="3" width="12" height="18" rx="3"/><circle cx="12" cy="10" r="3"/><path d="M10 16h4"/></svg>',
+    sim: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M6 17c3-1 4-6 7-7s4 1 5-3"/><circle cx="17" cy="16" r="2"/></svg>',
     more: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>'
   };
   function renderNav(hidden) {
     var nav = $('#nav'); nav.className = hidden ? 'hide' : '';
     if (hidden) { nav.innerHTML = ''; return; }
     var u = unsortedCount();
-    var items = [['ledger', '#/', 'Ledger'], ['sort', '#/sort', 'Sort Pass'], ['bucks', '#/bucks', 'Bucks'], ['cams', '#/cams', 'Cameras'], ['more', '#/more', 'More']];
+    var items = [['ledger', '#/', 'Ledger'], ['sort', '#/sort', 'Sort Pass'], ['bucks', '#/bucks', 'Bucks'], ['cams', '#/cams', 'Cameras'], ['sim', '#/sim', 'Simulator'], ['more', '#/more', 'More']];
     var on = { buck: 'bucks', photo: 'ledger', pull: 'ledger', stamp: 'ledger', clock: 'cams', cam: 'cams' }[R.view] || R.view;
     nav.innerHTML = items.map(function (it) {
       return '<a href="' + it[1] + '" class="' + (on === it[0] ? 'on' : '') + '" data-nav="' + it[0] + '">' + ICONS[it[0]] + it[2] + (it[0] === 'sort' && u ? '<span class="badge">' + (u > 999 ? '999+' : u) + '</span>' : '') + '</a>';
@@ -681,8 +765,8 @@
     });
   };
   function freeLine(kind) {
-    return kind === 'cam' ? 'The free version keeps ' + plural(camLimit(), 'camera') + '. <a href="#/more">Pro</a> unlocks unlimited cameras.'
-      : 'The free version keeps ' + plural(buckLimit(), 'named buck') + '. <a href="#/more">Pro</a> unlocks unlimited bucks.';
+    var t = tier(), lim = kind === 'cam' ? camLimit() : buckLimit(), noun = kind === 'cam' ? 'camera' : 'named buck';
+    return 'The ' + TIER_NAME[t] + ' version keeps ' + plural(lim, noun) + '. ' + (t === 'free' ? '<a href="#/more">Pro</a> keeps ' + plural(kind === 'cam' ? C.PRO_CAMERA_LIMIT : C.PRO_BUCK_LIMIT, noun) + '; <a href="#/more">Elite</a> is unlimited.' : '<a href="#/more">Elite</a> is unlimited.');
   }
   function addCamera(name) {
     if (!canAddCam()) { proSheet('cam'); return null; }
@@ -1000,19 +1084,25 @@
 
   /* ---------------- More: location, settings, backup, Pro ---------------- */
   VIEWS.more = function () {
-    var st = S.settings, pro = isPro();
+    var st = S.settings;
     var h = head('More');
-    h += '<div class="paper" id="pro"><h3>' + esc(APP) + ' Pro</h3>';
-    if (pro) {
-      h += '<p style="margin:0 0 6px">✓ Pro is unlocked on this phone' + (st.license.source === 'dev' ? ' (dev test code)' : '') + '.</p><p class="small muted">License key: <b>' + esc(maskKey(st.license.key)) + '</b>' + (st.license.verifiedAt ? ' · checked ' + fmtDay(st.license.verifiedAt) : '') + '. Keep your Gumroad receipt so you can enter the key again on a new phone.</p>';
-    } else {
-      h += (st.license && st.license.revokedAt ? '<p class="small" style="color:#9a2f1c">' + esc(st.license.reason || 'Your license is no longer active.') + '</p>' : '') +
-        '<p class="small" style="margin:0 0 8px">Free: ' + plural(C.FREE_CAMERA_LIMIT || 0, 'camera') + ' and ' + plural(C.FREE_BUCK_LIMIT || 0, 'named buck') + '. Pro: unlimited cameras and bucks. ' + esc(C.PRO_PRICE_NOTE || '') + '</p>' +
-        (C.CHECKOUT_URL && proOnSale() ? '<a class="btn go block" id="buy-pro" href="' + esc(C.CHECKOUT_URL) + '" target="_blank" rel="noopener">Get Pro' + (C.PRO_PRICE ? ' · ' + esc(C.PRO_PRICE) : '') + '</a>' : '<button class="btn go block" id="buy-pro" disabled>Pro: coming soon</button>');
+    var t = tier(), L = st.license;
+    h += '<div class="paper" id="pro"><h3>Your plan: ' + TIER_NAME[t] + '</h3>';
+    if (t !== 'free') {
+      h += '<p style="margin:0 0 6px">✓ ' + TIER_NAME[t] + ' is unlocked on this phone' + (L.source === 'dev' ? ' (dev test code)' : '') + '.</p><p class="small muted">License key: <b>' + esc(maskKey(L.key)) + '</b>' + (L.upgrade ? ' + upgrade key <b>' + esc(maskKey(L.upgrade.key)) + '</b>' : '') + (L.verifiedAt ? ' · checked ' + fmtDay(L.verifiedAt) : '') + '. Keep your Gumroad receipt' + (L.upgrade ? 's' : '') + ' so you can enter the key' + (L.upgrade ? 's' : '') + ' again on a new phone' + (L.upgrade ? ' (Pro key first, then the upgrade key)' : '') + '.</p>';
+    } else if (L && L.revokedAt) {
+      h += '<p class="small" style="color:#9a2f1c">' + esc(L.reason || 'Your license is no longer active.') + '</p>';
     }
-    if (proOnSale() || st.license) {
-      h += '<label class="field" style="margin-top:12px"><span>' + (pro ? 'Re-enter or change license key' : 'Have a license key?') + '</span><input type="text" id="lic" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="From your Gumroad receipt"></label>' +
-        '<button class="btn ink block" data-act="unlock">' + (pro ? 'Check key' : 'Unlock Pro') + '</button><p class="small" id="lic-msg" style="margin:8px 0 0"></p>' +
+    h += '<div class="tiers">' +
+      '<div class="tier' + (t === 'free' ? ' cur' : '') + '"><b>Free</b><span>' + plural(C.FREE_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.FREE_BUCK_LIMIT || 0, 'named buck') + '</span></div>' +
+      '<div class="tier' + (t === 'pro' ? ' cur' : '') + '"><b>Pro' + (priceOf('pro') ? ' · ' + esc(priceOf('pro')) : '') + '</b><span>' + plural(C.PRO_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.PRO_BUCK_LIMIT || 0, 'named buck') + '</span></div>' +
+      '<div class="tier' + (t === 'elite' ? ' cur' : '') + '"><b>Elite' + (priceOf('elite') ? ' · ' + esc(priceOf('elite')) : '') + '</b><span>Unlimited cameras &amp; bucks + Movement Simulator</span></div></div>' +
+      '<p class="tiny muted" style="margin:6px 0 10px">' + esc(C.PRO_PRICE_NOTE || '') + '</p>';
+    if (t === 'free') h += buyBtn('pro', 'Get Pro') + '<div style="height:8px"></div>' + buyBtn('elite', 'Get Elite');
+    if (t === 'pro') h += buyBtn('upgrade', 'Upgrade to Elite') + '<p class="tiny muted" style="margin:6px 0 0">For Pro owners: pay just the difference. Enter the upgrade key below; it works together with your Pro key.</p>';
+    if (proOnSale() || L) {
+      h += '<label class="field" style="margin-top:12px"><span>' + (t !== 'free' ? 'Enter another key (upgrade or re-check)' : 'Have a license key?') + '</span><input type="text" id="lic" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="From your Gumroad receipt"></label>' +
+        '<button class="btn ink block" data-act="unlock">' + (t !== 'free' ? 'Check key' : 'Unlock') + '</button><p class="small" id="lic-msg" style="margin:8px 0 0"></p>' +
         '<p class="tiny muted" style="margin:4px 0 0">Activating needs internet once. Your key is sent only to Gumroad to check it. Purchases, support and refunds are handled through Gumroad.</p>';
     } else if (C.DEV_MODE) {
       h += '<label class="field" style="margin-top:12px"><span>Test code</span><input type="text" id="lic"></label><button class="btn ink block" data-act="unlock">Unlock</button><p class="small" id="lic-msg"></p>';
@@ -1035,8 +1125,36 @@
     h += '<div class="paper"><h3>Storage</h3><p class="small" style="margin:0 0 8px">' + plural(P.length, 'photo') + ' stored · ' + plural(empties, 'empty photo') + '</p>' +
       (empties ? '<button class="btn ink block" data-act="del-empties">Delete the ' + plural(empties, 'empty photo') + '</button>' : '') +
       '<button class="btn danger block" style="margin-top:8px" data-act="erase">Erase everything</button></div>';
-    h += '<div class="paper small"><h3>About</h3><p>' + esc(APP) + ' is a trail cam logbook built by a hunter. No account, no ads, no trackers, no subscription. Photos are shrunk and kept in this browser’s storage on this phone; they are never uploaded. Works offline after the first visit.</p><p style="margin:0"><a href="privacy.html">Privacy</a> · Version 1.0.0</p></div>';
+    h += '<div class="paper small"><h3>About</h3><p>' + esc(APP) + ' is a trail cam logbook built by a hunter. No account, no ads, no trackers, no subscription. Photos are shrunk and kept in this browser’s storage on this phone; they are never uploaded. Works offline after the first visit.</p><p style="margin:0"><a href="privacy.html">Privacy</a> · Version 2.0.0</p></div>';
     return h + installNote();
+  };
+
+  /* ---------------- Movement Simulator (Elite) ---------------- */
+  var simApi = null;
+  VIEWS.sim = function () {
+    var h = head('Movement Simulator');
+    if (!isElite()) {
+      var t = tier();
+      return h + '<div class="paper" id="sim-locked"><h3>🔒 An Elite feature</h3>' +
+        '<p>Draw your property (bedding, food, water, creeks, funnels, roads, neighbor lines, stands) and watch where a buck is <i>likely</i> to move by hour. Slide time of day, season phase, wind, temperature and hunting pressure. A heat map and green/yellow/red stands update as you go, with a plain-language “why”.</p>' +
+        '<p class="small muted">Built from published whitetail GPS-collar research plus clearly labeled assumptions. It’s a thinking tool, not a forecast. Runs offline on your phone; your map is saved on the phone and in your backups.</p>' +
+        (t === 'pro' ? buyBtn('upgrade', 'Upgrade to Elite') : buyBtn('elite', 'Get Elite')) +
+        (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more">I have a license key</a>' : '') + '</div>';
+    }
+    return h + '<div id="sim-root"></div>';
+  };
+  VIEWS.sim.after = function () {
+    var el = $('#sim-root'); if (!el || !window.BuckSim) return;
+    simApi = window.BuckSim.mount(el, {
+      getMap: function () { return S.map; },
+      saveMap: function (m) { S.map = window.BuckSim.clean(m); save(); },
+      cameras: function () { return S.cameras.map(function (c) { return { id: c.id, name: c.name }; }); },
+      toast: function (m) { toast(m); },
+      sun: function () { if (!hasLoc()) return null; var t = sunTimes(new Date(), S.settings.lat, S.settings.lng); if (!t || !t.rise || !t.set) return null; return { rise: t.rise.getHours() + t.rise.getMinutes() / 60, set: t.set.getHours() + t.set.getMinutes() / 60 }; },
+      visitCount: function (camId, h0, h1) {
+        return visits('bucks', camId).filter(function (v) { var hh = v.d.getHours() + v.d.getMinutes() / 60; return h0 < 0 ? (hh >= h0 + 24 || hh <= h1) : h1 >= 24 ? (hh >= h0 || hh <= h1 - 24) : (hh >= h0 && hh <= h1); }).length;
+      }
+    });
   };
 
   /* ---------------- sheets ---------------- */
@@ -1045,11 +1163,17 @@
       if (x === 'ok') { var v = ($('#prompt-in').value || '').trim(); if (!v) { toast('Type a name'); return false; } close(v); return false; }
     }).then(function (v) { return typeof v === 'string' ? v : null; });
   }
+  function buyBtn(t, label) {
+    var url = checkoutFor(t), price = priceOf(t);
+    if (url) return '<a class="btn go block" id="buy-' + t + '" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(label) + (price ? ': ' + esc(price) : '') + '</a>';
+    return '<button class="btn go block" id="buy-' + t + '" disabled>' + esc(label) + (price ? ': ' + esc(price) : '') + ' · coming soon</button>';
+  }
   function proSheet(kind) {
-    var on = proOnSale() && C.CHECKOUT_URL;
-    sheet('<h2>Free version limit</h2><p>' + (kind === 'cam' ? 'The free version keeps ' + plural(camLimit(), 'camera') + '.' : 'The free version keeps ' + plural(buckLimit(), 'named buck') + '.') + ' Pro unlocks unlimited cameras and named bucks. ' + esc(C.PRO_PRICE_NOTE || '') + '</p>' +
-      (on ? '<a class="btn go block" href="' + esc(C.CHECKOUT_URL) + '" target="_blank" rel="noopener">Get Pro' + (C.PRO_PRICE ? ' · ' + esc(C.PRO_PRICE) : '') + '</a><a class="btn ink block" style="margin-top:8px" href="#/more" data-x="close">I have a license key</a>'
-        : '<button class="btn go block" disabled>Pro: coming soon</button>') +
+    var t = tier(), what = kind === 'cam' ? plural(camLimit(), 'camera') : plural(buckLimit(), 'named buck');
+    var body = t === 'free'
+      ? '<p>The free version keeps ' + what + '. <b>Pro</b>' + (priceOf('pro') ? ' (' + esc(priceOf('pro')) + ')' : '') + ' keeps ' + plural(C.PRO_CAMERA_LIMIT, 'camera') + ' and ' + plural(C.PRO_BUCK_LIMIT, 'named buck') + '. <b>Elite</b>' + (priceOf('elite') ? ' (' + esc(priceOf('elite')) + ')' : '') + ' is unlimited and adds the Movement Simulator. ' + esc(C.PRO_PRICE_NOTE || '') + '</p>' + buyBtn('pro', 'Get Pro') + '<div style="height:8px"></div>' + buyBtn('elite', 'Get Elite')
+      : '<p>Pro keeps ' + what + '. <b>Elite</b> is unlimited and adds the Movement Simulator. Pro owners pay just the difference.</p>' + buyBtn('upgrade', 'Upgrade to Elite');
+    sheet('<h2>' + TIER_NAME[t] + ' limit reached</h2>' + body + (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more" data-x="close">I have a license key</a>' : '') +
       '<button class="btn ink block" style="margin-top:8px" data-x="close">Not now</button>');
   }
 
@@ -1265,7 +1389,7 @@
   window.BuckLedger = {
     ready: ready, state: function () { return S; }, photos: function () { return P; },
     readExif: readExif, sunTimes: sunTimes, lightOf: function (d) { return lightOf(d); }, visits: function (s, c) { return visits(s || 'any', c); },
-    plainRead: function (s) { return plainRead(visits(s)); }, flush: flush, isPro: function () { return isPro(); }
+    plainRead: function (s) { return plainRead(visits(s)); }, flush: flush, isPro: function () { return isPro(); }, tier: function () { return tier(); }, sim: function () { return simApi; }
   };
   boot();
 })();

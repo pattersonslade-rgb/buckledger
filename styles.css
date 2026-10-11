@@ -139,3 +139,9 @@ body.full #toast{bottom:auto;top:calc(56px + var(--safe-t))}
 .ledger::before{left:66px}
 .lrow .tm{width:52px;font-size:12.5px}
 .lday,.lpull{padding-left:78px}
+.tiers{display:grid;gap:6px}
+.tier{display:flex;flex-direction:column;border:2px solid #cbbf9f;border-radius:10px;padding:8px 10px;background:#fffaf0}
+.tier b{font-size:15px}.tier span{font-size:13px;color:var(--ink2)}
+.tier.cur{border-color:var(--ink);box-shadow:0 0 0 1px var(--ink) inset}
+#nav a{font-size:10.5px}
+#sim-root{margin-top:4px}

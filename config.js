@@ -1,28 +1,53 @@
-/* Buck Ledger settings: the only file you need to edit to launch Pro.
+/* Buck Ledger settings: the only file you need to edit to launch paid tiers.
  *
- * >>> GUMROAD_PRODUCT_ID and CHECKOUT_URL are NOT SET YET (left empty on purpose). <<<
- *   Slade: create the Gumroad product, tick "Generate a unique license key per sale",
- *   then paste the product_id Gumroad shows into GUMROAD_PRODUCT_ID and the product link
- *   into CHECKOUT_URL, bump VERSION in sw.js and redeploy.
- *   While they are empty the app runs in FREE mode and the Pro button says "coming soon".
- * PRO_PRICE: wording shown in the app (empty = no price shown).
- * FREE_CAMERA_LIMIT / FREE_BUCK_LIMIT: what the free version allows (0 = unlimited).
- * License keys are verified ONCE online with Gumroad, then Pro works offline. Refunded /
- *   charged-back / disabled keys are refused, and (when online) re-checked every RECHECK_DAYS.
- * Support and refunds go through Gumroad only.
- * DEV_MODE: keep false in production. When true, the code BUCKLEDGER-TEST also unlocks.
+ * TIERS (all one-time purchases on Gumroad, no subscription):
+ *   Free  : FREE_CAMERA_LIMIT cameras, FREE_BUCK_LIMIT named bucks
+ *   Pro   : PRO_CAMERA_LIMIT cameras, PRO_BUCK_LIMIT named bucks           (PRO_PRICE)
+ *   Elite : unlimited cameras + bucks, plus the Movement Simulator          (ELITE_PRICE)
+ *   Elite Upgrade : Pro owners pay the difference (UPGRADE_PRICE). Its key only unlocks Elite on a phone
+ *                   that already holds a valid Pro key; both keys are re-checked with Gumroad.
+ *
+ * >>> ALL PRODUCT IDS AND CHECKOUT LINKS ARE EMPTY ON PURPOSE. NOT SET YET. NEVER GUESS THEM. <<<
+ *   While empty, the app runs in Free mode and the buy buttons say "coming soon". Nothing breaks.
+ *
+ * OPTION A (recommended): ONE Gumroad product with three versions named exactly
+ *   "Pro" ($30), "Elite" ($50), "Elite Upgrade" ($20), with "Generate a unique license key per sale" on.
+ *   Paste its product_id into GUMROAD_PRODUCT_ID and its link into CHECKOUT_URL.
+ *   The app reads the version from Gumroad's verify reply (purchase.variants).
+ * OPTION B (fallback): three separate products. Fill PRO_/ELITE_/UPGRADE_PRODUCT_ID and the matching
+ *   *_CHECKOUT_URL instead (leave GUMROAD_PRODUCT_ID empty).
+ * After editing: bump VERSION in sw.js and publish.
+ *
+ * License keys are verified ONCE online with Gumroad, then work offline. Refunded / charged-back /
+ *   disabled keys are refused, and (when online) re-checked every RECHECK_DAYS.
+ * DEV_MODE: keep false in production. When true, the code BUCKLEDGER-TEST unlocks Elite for testing.
  */
 window.BUCKLEDGER_CONFIG = {
   APP_NAME: "Buck Ledger",
-  PRO_PRICE: "",                  // e.g. "$9.99" once Slade picks the price
+  PRO_PRICE: "$30",
+  ELITE_PRICE: "$50",
+  UPGRADE_PRICE: "$20",
   PRO_PRICE_NOTE: "One-time purchase. No subscription.",
-  CHECKOUT_URL: "",               // <<< SET THIS: Gumroad product link
-  GUMROAD_PRODUCT_ID: "",         // <<< SET THIS: product_id from Gumroad. Never guess it.
+
+  // Option A: one product with versions "Pro", "Elite", "Elite Upgrade"
+  GUMROAD_PRODUCT_ID: "",        // <<< SET THIS (from Gumroad). Do not guess.
+  CHECKOUT_URL: "",              // <<< SET THIS: the product link, e.g. https://sladepatterson.gumroad.com/l/xxxxx
+
+  // Option B (fallback): separate products. Leave empty if you use Option A.
+  PRO_PRODUCT_ID: "",            // <<< not set
+  ELITE_PRODUCT_ID: "",          // <<< not set
+  UPGRADE_PRODUCT_ID: "",        // <<< not set
+  PRO_CHECKOUT_URL: "",          // <<< not set (Option A: optional direct link to the Pro version)
+  ELITE_CHECKOUT_URL: "",        // <<< not set
+  UPGRADE_CHECKOUT_URL: "",      // <<< not set
+
   LICENSE_VERIFY_URL: "https://api.gumroad.com/v2/licenses/verify", // Gumroad allows browser (CORS) calls
   MAX_ACTIVATIONS: 5,
   RECHECK_DAYS: 30,
-  FREE_CAMERA_LIMIT: 1,           // free tier (confirmed by Slade): 1 camera
-  FREE_BUCK_LIMIT: 1,             // free tier (confirmed by Slade): 1 named buck
+  FREE_CAMERA_LIMIT: 1,          // confirmed by Slade
+  FREE_BUCK_LIMIT: 1,            // confirmed by Slade
+  PRO_CAMERA_LIMIT: 3,           // confirmed by Slade
+  PRO_BUCK_LIMIT: 3,             // confirmed by Slade
 
   DEV_MODE: false,
   DEV_UNLOCK_CODE_SHA256: [

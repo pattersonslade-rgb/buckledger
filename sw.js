@@ -1,8 +1,8 @@
 /* Buck Ledger service worker: makes the app work fully offline.
  * Bump VERSION whenever you publish changes. */
-var VERSION = 'buckledger-v1.0.1';
+var VERSION = 'buckledger-v2.0.0';
 var ASSETS = [
-  './', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'privacy.html',
+  './', 'index.html', 'styles.css', 'app.js', 'sim.js', 'config.js', 'manifest.webmanifest', 'privacy.html',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png', 'icons/favicon-32.png'
 ];
 self.addEventListener('install', function (e) {
