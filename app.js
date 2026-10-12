@@ -305,7 +305,7 @@
     if (!d || !hasLoc()) return '';
     var st = sunTimes(d, S.settings.lat, S.settings.lng); if (st.polar) return '';
     var t = d.getTime(), toR = Math.round((t - st.rise.getTime()) / 60000), toS = Math.round((t - st.set.getTime()) / 60000);
-    function hm(x) { x = Math.abs(x); return x >= 60 ? Math.floor(x / 60) + 'h ' + (x % 60) + 'm' : x + 'm'; }
+    function hm(x) { x = Math.abs(x); return x >= 60 ? Math.floor(x / 60) + ' hr ' + (x % 60) + ' min' : x + ' min'; }
     if (Math.abs(toR) <= Math.abs(toS)) return hm(toR) + (toR < 0 ? ' before' : ' after') + ' sunrise (' + fmtTime(st.rise) + ')';
     return hm(toS) + (toS < 0 ? ' before' : ' after') + ' sunset (' + fmtTime(st.set) + ')';
   }
@@ -1579,7 +1579,7 @@
     var have = DEM && DEM.key === demKey(box);
     if (!have) return '<div class="paper" id="t3-fetch"><h3>Get your elevation</h3><p class="small">One download from USGS 3DEP for your box (about 70 KB). It is saved on this phone, so you only do this once. Only the box corners are sent.</p><button class="btn go block" data-act="t3-dem">Get USGS elevation</button><button class="btn ink block" style="margin-top:8px" data-act="t3-reset">Change the box</button></div>';
     return '<div id="t3-root"></div><div class="btn-row" style="margin-top:8px"><button class="btn ink" data-act="t3-park">Mark parking</button><a class="btn ink" href="#/sim">Edit 2D map</a><button class="btn ink" data-act="t3-reset">Change box</button></div>' +
-      '<p class="tiny muted">Model, not a promise: wind and slope air from textbook formulas (Turner stability, Briggs plume spread), deer routes from your own bedding and food marks. Read the why for each stand.</p>';
+      '<p class="tiny muted">Model, not a promise. Wind under cover uses US Forest Service shelter factors; slope air uses published downslope and upslope speeds; scent spread uses textbook formulas (Turner stability, Briggs spread). When deer smell you is an estimate: no study gives that distance. Deer routes come from your own bedding and food marks.</p>';
   }
   function mount3d() {
     var el = $('#t3-root'); if (!el || !window.BLTerrain) return;

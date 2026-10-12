@@ -114,8 +114,30 @@
     }
   }
   function chi(cls, x, u, H) { var s = briggs(cls, Math.max(x, 5)); return Math.exp(-H * H / (2 * s.sz * s.sz)) / (Math.PI * s.sy * s.sz * Math.max(u, 0.5)); }
-  // Reference: scent level 300 m downwind of a ground source, neutral air (D), 2 m/s. Above this = "deer can likely smell it".
-  var CHI_REF = chi(4, 300, 2, 0);
+  // "Deer can likely smell it" reference = scent level 1,000 ft (305 m) downwind of a ground source in neutral air (D) at 2 m/s (4.5 mph).
+  // ESTIMATE: no published study gives a distance or odor threshold at which white-tailed deer detect a person (searched Oct 2026;
+  // DePauw camera study shows bucks avoid human-scented trails by day but measures no distance). Kept as a labeled estimate.
+  var SCENT_REF_FT = 1000, CHI_REF = chi(4, SCENT_REF_FT * 0.3048, 2, 0);
+
+  /* Wind under cover. PUBLISHED: wind adjustment factors (WAF) from USDA Forest Service RMRS-GTR-266 (Andrews 2012),
+     Table 6 (BehavePlus / Fireline Handbook): partially sheltered 0.3, fully sheltered sparse stand 0.2, fully sheltered
+     dense stand 0.1; unsheltered short fuel 0.4. WAF multiplies the 20-ft wind; a 10-m (33-ft) wind is divided by 1.15 first
+     (same report). ESTIMATE: which shelter class each map zone falls in. */
+  var WAF = { 'B': 0.1, 'N': 0.2, 'C': 0.2, '.': 0.3, 'X': 0.3, 'F': 0.4, 'W': 0.4, 'R': 0.4 };
+  function underCover(u10, zone) { return u10 / 1.15 * (WAF[zone] == null ? 0.3 : WAF[zone]); }
+
+  /* Slope (thermal) air speed. PUBLISHED: bulk downslope (katabatic) flow ~1 m/s (2.2 mph) on slopes a few hundred meters
+     long and 2-3 m/s (4.5-6.7 mph) on slopes 1 km (0.6 mi) or longer (Haiden & Whiteman 2005, J. Appl. Meteor. 44, citing
+     Mahrt 1982 and Doran et al. 1990), seen there on a slope of only 1.6 degrees (2.8% grade). Upslope (anabatic) flow is
+     usually 1-2 m/s (2.2-4.5 mph) (Royal Meteorological Society). ESTIMATES: the straight-line blend by slope length,
+     scaling the upslope speed with sun height, full strength from a 2.8% grade up (fading to zero on flat ground),
+     and 0.3 m/s (0.7 mph) when the air is switching. */
+  function slopeFlow(mode, sunEl, runM) {
+    if (mode === 'down') return 1 + 1.5 * clamp((runM - 300) / 700, 0, 1);
+    if (mode === 'up') return 1 + clamp((sunEl - 8) / 37, 0, 1);
+    return 0.3;
+  }
+  var FULL_GRADE = 0.028;
 
   /* ---------- terrain fields ---------- */
   function fields(z, wm, hm) {
@@ -147,9 +169,9 @@
     return { u10: u10, el: el, cls: cls, mode: mode, tx: Math.sin(to), ty: -Math.cos(to), calm: u10 < 1.0 };
   }
   function flowAt(F, A, i) {
-    // wind near the ground under cover is a fraction of the 10 m wind; slope flow adds where the ground tilts
-    var uw = A.u10 * 0.45, th = A.mode === 'down' ? 1.0 : A.mode === 'up' ? 0.9 * clamp(A.el / 30, 0.3, 1) : 0.2;
-    var sf = clamp(F.sl[i] / 0.08, 0, 1), dir = A.mode === 'up' ? 1 : -1;
+    // m/s: open wind slowed by cover (published WAF) plus slope air (published speeds), see notes above
+    var uw = underCover(A.u10, F.zone ? F.zone[i] : '.'), th = slopeFlow(A.mode, A.el, F.run || 300);
+    var sf = clamp(F.sl[i] / FULL_GRADE, 0, 1), dir = A.mode === 'up' ? 1 : -1;
     var gx = F.gx[i], gy = F.gy[i], gl = F.sl[i] || 1;
     var vx = uw * A.tx + th * sf * dir * gx / gl, vy = uw * A.ty + th * sf * dir * gy / gl;
     return [vx, vy];
@@ -315,6 +337,8 @@
       var z = host.dem(), map = host.map(), box = host.box();
       if (!z || !map || !box) { T = null; return; }
       var b = bbox(box), F = fields(z, b.wm, b.hm), st = host.sunTimes(day);
+      F.zone = []; for (var zi = 0; zi < NX * NY; zi++) F.zone.push(zoneAt(map, zi % NX, (zi / NX) | 0));
+      F.run = Math.hypot(b.wm, b.hm);   // slope length: the property's span (ESTIMATE; slopes may run past the box)
       T = { z: z, map: map, F: F, lat: box.lat, lng: box.lng, wm: b.wm, hm: b.hm, rise: st && st.rise, set: st && st.set, parking: host.parking() || [] };
       T.routes = routes(map, F);
       var rel = Math.max(F.max - F.min, 1); T.ex = clamp(0.16 * b.wm / rel, 1, 6);
@@ -451,5 +475,5 @@
       renderMs: function () { var t0 = performance.now(); bufKey = ''; terrain(); return performance.now() - t0; }
     };
   }
-  window.BLTerrain = { mount: mount, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes };
+  window.BLTerrain = { mount: mount, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF, SCENT_REF_FT: SCENT_REF_FT, FULL_GRADE: FULL_GRADE };
 })();
