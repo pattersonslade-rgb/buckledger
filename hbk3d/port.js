@@ -7,7 +7,7 @@
   var f = function (h) { return [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) / 255]; };
   var SC = f(P.scent);
   window.BL_PORT = {
-    anon: !buyer, tapLabels: true, noBucks: buyer ? 'No buck visits on this day' : null, palette: P, dataBase: buyer ? 'buyer:' : 'data/',
+    anon: !buyer, tapLabels: false, noBucks: buyer ? 'No buck visits on this day' : null, palette: P, dataBase: buyer ? 'buyer:' : 'data/',
     scentRGB: function (a) { return [SC[0] + .25 * (1 - a) * (1 - SC[0]), SC[1] + .25 * (1 - a) * (1 - SC[1]), SC[2]]; },
     sinkRGB: f(P.thermalSink), riseRGB: f(P.thermalRise),
     tours: function (T) { // same tour segments; the Example's stands replace the old ones nearest to them; no numbers in captions
