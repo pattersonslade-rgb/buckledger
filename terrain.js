@@ -114,10 +114,9 @@
     }
   }
   function chi(cls, x, u, H) { var s = briggs(cls, Math.max(x, 5)); return Math.exp(-H * H / (2 * s.sz * s.sz)) / (Math.PI * s.sy * s.sz * Math.max(u, 0.5)); }
-  // "Deer can likely smell it" reference = scent level 1,000 ft (305 m) downwind of a ground source in neutral air (D) at 2 m/s (4.5 mph).
-  // ESTIMATE: no published study gives a distance or odor threshold at which white-tailed deer detect a person (searched Oct 2026;
-  // DePauw camera study shows bucks avoid human-scented trails by day but measures no distance). Kept as a labeled estimate.
-  var SCENT_REF_FT = 1000, CHI_REF = chi(4, SCENT_REF_FT * 0.3048, 2, 0);
+  // No smell distance or threshold: no study gives one. The plume is the path your air takes (wind + cover + slope air)
+  // with its sideways spread (Briggs sigma-y), followed until it leaves the property. Stands are rated only by whether that
+  // path crosses deer areas (NDA: keep scent from blowing toward deer).
 
   /* Wind under cover. PUBLISHED: wind adjustment factors (WAF) from USDA Forest Service RMRS-GTR-266 (Andrews 2012),
      Table 6 (BehavePlus / Fireline Handbook): partially sheltered 0.3, fully sheltered sparse stand 0.2, fully sheltered
@@ -190,19 +189,16 @@
   }
   // scent grid from one source; H = height of the scent source (m)
   function plume(F, A, x0, y0, H, maxM) {
-    var g = new Float32Array(NX * NY), pts = trace(F, A, x0, y0, maxM || 700);
+    var g = new Float32Array(NX * NY), pts = trace(F, A, x0, y0, maxM || 1e9);
     pts.forEach(function (p) {
-      var s = briggs(A.cls, p.d), c = chi(A.cls, p.d, p.u, H) / CHI_REF, span = Math.min(3 * s.sy, 250);
+      var s = briggs(A.cls, p.d), span = s.sy;   // core of the plume: +/- one sigma-y each side of the air path
       var steps = Math.max(1, Math.ceil(span / F.dx));
       for (var k = -steps; k <= steps; k++) {
         var off = k * span / steps, X = Math.round(p.x + p.nx * off / F.dx), Y = Math.round(p.y + p.ny * off / F.dy);
         if (X < 0 || Y < 0 || X >= NX || Y >= NY) continue;
-        var val = c * Math.exp(-off * off / (2 * s.sy * s.sy)); if (val > g[Y * NX + X]) g[Y * NX + X] = val;
+        var val = Math.exp(-off * off / (2 * s.sy * s.sy)); if (val > g[Y * NX + X]) g[Y * NX + X] = val;   // 0..1 shading only
       }
     });
-    if (A.calm) { // light and variable: scent pools around the source in every direction
-      for (var y = 0; y < NY; y++) for (var x = 0; x < NX; x++) { var dd = Math.hypot((x - x0) * F.dx, (y - y0) * F.dy); if (dd < 90) g[y * NX + x] = Math.max(g[y * NX + x], 1.5 * (1 - dd / 90)); }
-    }
     return { g: g, pts: pts };
   }
 
@@ -269,15 +265,17 @@
     T.routes.forEach(function (r) { r.forEach(function (i) { for (var oy = -1; oy <= 1; oy++) for (var ox = -1; ox <= 1; ox++) { var x = i % NX + ox, y = ((i / NX) | 0) + oy; if (x >= 0 && y >= 0 && x < NX && y < NY) onRoute[y * NX + x] = 1; } }); });
     for (var i = 0; i < NX * NY; i++) { var z = zoneAt(map, i % NX, (i / NX) | 0); deer[i] = Math.max(z === 'B' ? W.B : z === 'F' ? W.F : 0, onRoute[i] ? W.R : 0); }
     var stands = (map.stands || []).map(function (s) {
-      var x0 = s.x * K + K / 2, y0 = s.y * K + K / 2, P = plume(F, A, x0, y0, 6, 700), strong = 0, faint = 0, hitB = 0, hitR = 0, hitF = 0;
+      var x0 = s.x * K + K / 2, y0 = s.y * K + K / 2, P = plume(F, A, x0, y0, 6), now = 0, quiet = 0, hitB = 0, hitR = 0, hitF = 0;
       for (var j = 0; j < NX * NY; j++) {
-        var c = P.g[j]; if (c < 1 || deer[j] < 0.6) continue;
-        var z = zoneAt(map, j % NX, (j / NX) | 0);
-        if (c >= 3) strong++; else faint++;
-        if (z === 'B') hitB++; else if (z === 'F') hitF++; else if (onRoute[j]) hitR++;
+        if (!P.g[j]) continue;
+        var z = zoneAt(map, j % NX, (j / NX) | 0), area = z === 'B' || z === 'F' || onRoute[j];
+        if (!area) continue;
+        if (deer[j] >= 0.6) { now++; if (z === 'B') hitB++; else if (z === 'F') hitF++; else hitR++; } else quiet++;
       }
-      var color = strong >= 3 ? 'red' : (strong || faint >= 4 || A.calm || A.mode === 'mixed') ? 'yellow' : 'green';
-      return { name: s.name, x: x0, y: y0, plume: P, color: color, hitB: hitB, hitR: hitR, hitF: hitF, strong: strong };
+      // red: crosses a deer area where deer likely are this hour; yellow: crosses deer areas that are likely quiet now,
+      // or the air is calm / switching so its path can't be trusted; green: crosses no deer area on the property
+      var color = now ? 'red' : (quiet || A.calm || A.mode === 'mixed') ? 'yellow' : 'green';
+      return { name: s.name, x: x0, y: y0, plume: P, color: color, hitB: hitB, hitR: hitR, hitF: hitF, quiet: quiet };
     });
     return { A: A, phase: ph, deer: deer, onRoute: onRoute, stands: stands };
   }
@@ -285,9 +283,9 @@
   function walkIn(T, M, s) {
     if (!T.parking.length) return null;
     var F = T.F, A = M.A, cost = new Float32Array(NX * NY);
-    // exposure: does the air from this spot carry your scent into deer areas within ~200 m?
+    // exposure: does the air from this spot cross a deer area anywhere on the property?
     for (var y = 0; y < NY; y += 2) for (var x = 0; x < NX; x += 2) {
-      var pts = trace(F, A, x, y, 200), bad = 0;
+      var pts = trace(F, A, x, y, 1e9), bad = 0;
       for (var k = 0; k < pts.length; k += 2) { var j = Math.round(pts[k].y) * NX + Math.round(pts[k].x); if (M.deer[j] >= 0.6) { bad = 1; break; } }
       for (var oy = 0; oy < 2; oy++) for (var ox = 0; ox < 2; ox++) if (y + oy < NY && x + ox < NX) cost[(y + oy) * NX + x + ox] = bad;
     }
@@ -306,9 +304,9 @@
   function reasons(T, M, s, w) {
     var A = M.A, out = [], wind = A.calm ? 'Calm, shifting air' : 'Wind from the ' + DIR8[Math.round(((A.tx === 0 && A.ty === 0) ? 0 : ((Math.atan2(-A.tx, A.ty) / D2R) + 360) % 360) / 45) % 8];
     out.push(wind + (A.mode === 'down' ? ', and cooling air is sinking downhill.' : A.mode === 'up' ? ', and warming air is rising uphill.' : ', and the air is switching between rising and sinking.'));
-    if (s.color === 'red') out.push('Your scent drifts into ' + (s.hitB ? 'bedding' : s.hitR ? 'a deer route' : 'the food') + ' where deer should be now. Skip this stand this hour.');
-    else if (s.color === 'yellow') out.push(A.calm ? 'With almost no wind, scent pools around the stand and can swirl.' : A.mode === 'mixed' ? 'Around sunrise and sunset the air can flip. Scent may swirl.' : 'Some faint scent reaches deer areas. Hunt it with care.');
-    else out.push('Your scent stays off bedding, food and the routes this hour.');
+    if (s.color === 'red') out.push('Your air blows over ' + (s.hitB ? 'bedding' : s.hitR ? 'a deer route' : 'the food') + ' where deer should be now. Skip this stand this hour.');
+    else if (s.color === 'yellow') out.push(A.calm ? 'With almost no wind, your air has no steady path and can swirl.' : A.mode === 'mixed' ? 'Around sunrise and sunset the air can flip. Scent may swirl.' : 'Your air crosses deer areas that are likely quiet this hour. Hunt it with care.');
+    else out.push('Your air does not blow over bedding, food or the routes on the property this hour.');
     if (A.mode === 'down' && s.color !== 'green') out.push('Cold air drains into low ground and carries scent with it.');
     if (w === null) out.push('Mark where you park to get a walk-in.');
     else if (w) {
@@ -390,7 +388,7 @@
         var zc = ZCOL[zoneAt(T.map, x + 1, y + 1)] || ZCOL['.'], col = [zc[0] * sh, zc[1] * sh, zc[2] * sh];
         if (M && M.deer[i] >= 0.6 && zoneAt(T.map, x + 1, y + 1) === '.') col = [col[0] * 0.9 + 30, col[1] * 0.9 + 22, col[2] * 0.9];
         if (M && M.A.mode === 'down' && T.F.low[i] > 0.6) col = [col[0] * 0.75, col[1] * 0.8, col[2] * 0.8 + 50];   // cold air pooling
-        if (scent) { var sv = Math.max(scent[i], scent[i + 1] || 0, scent[i + NX] || 0); if (sv >= 1) { var a = sv >= 3 ? 0.6 : 0.35; col = [col[0] * (1 - a) + 240 * a, col[1] * (1 - a) + 120 * a, col[2] * (1 - a) + 40 * a]; } }
+        if (scent) { var sv = Math.max(scent[i], scent[i + 1] || 0, scent[i + NX] || 0); if (sv > 0.05) { var a = 0.2 + 0.35 * sv; col = [col[0] * (1 - a) + 240 * a, col[1] * (1 - a) + 120 * a, col[2] * (1 - a) + 40 * a]; } }
         if (night) col = [col[0] * 0.55, col[1] * 0.6, col[2] * 0.75 + 12];
         quads.push({ d: (p1[2] + p2[2] + p3[2] + p4[2]) / 4, p: [p1, p2, p3, p4], c: 'rgb(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ')' });
       }
@@ -470,10 +468,10 @@
     return {
       destroy: function () { dead = true; cancelAnimationFrame(raf); window.removeEventListener('resize', onResize); },
       refresh: function () { setup(); compute(); },
-      state: function () { return M ? { phase: M.phase, mode: M.A.mode, cls: M.A.cls, calm: M.A.calm, stands: M.stands.map(function (s) { return { name: s.name, color: s.color, hitB: s.hitB, hitR: s.hitR, strong: s.strong }; }), routes: T.routes.length, walk: W ? { len: W.path.length, exposed: W.exposed } : W, why: Array.prototype.map.call(el.querySelectorAll('.t3-why li'), function (l) { return l.textContent; }) } : null; },
+      state: function () { return M ? { phase: M.phase, mode: M.A.mode, cls: M.A.cls, calm: M.A.calm, stands: M.stands.map(function (s) { return { name: s.name, color: s.color, hitB: s.hitB, hitR: s.hitR, quiet: s.quiet }; }), routes: T.routes.length, walk: W ? { len: W.path.length, exposed: W.exposed } : W, why: Array.prototype.map.call(el.querySelectorAll('.t3-why li'), function (l) { return l.textContent; }) } : null; },
       setHour: function (h) { hour = h; hr.value = h; compute(); }, setSel: function (k) { sel = k; compute(); },
       renderMs: function () { var t0 = performance.now(); bufKey = ''; terrain(); return performance.now() - t0; }
     };
   }
-  window.BLTerrain = { mount: mount, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF, SCENT_REF_FT: SCENT_REF_FT, FULL_GRADE: FULL_GRADE };
+  window.BLTerrain = { mount: mount, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF, FULL_GRADE: FULL_GRADE };
 })();

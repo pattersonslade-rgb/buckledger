@@ -1579,7 +1579,7 @@
     var have = DEM && DEM.key === demKey(box);
     if (!have) return '<div class="paper" id="t3-fetch"><h3>Get your elevation</h3><p class="small">One download from USGS 3DEP for your box (about 70 KB). It is saved on this phone, so you only do this once. Only the box corners are sent.</p><button class="btn go block" data-act="t3-dem">Get USGS elevation</button><button class="btn ink block" style="margin-top:8px" data-act="t3-reset">Change the box</button></div>';
     return '<div id="t3-root"></div><div class="btn-row" style="margin-top:8px"><button class="btn ink" data-act="t3-park">Mark parking</button><a class="btn ink" href="#/sim">Edit 2D map</a><button class="btn ink" data-act="t3-reset">Change box</button></div>' +
-      '<p class="tiny muted">Model, not a promise. Wind under cover uses US Forest Service shelter factors; slope air uses published downslope and upslope speeds; scent spread uses textbook formulas (Turner stability, Briggs spread). When deer smell you is an estimate: no study gives that distance. Deer routes come from your own bedding and food marks.</p>';
+      '<p class="tiny muted">Model, not a promise. Wind under cover uses US Forest Service shelter factors; slope air uses published downslope and upslope speeds; scent spread uses textbook formulas (Turner stability, Briggs spread). Stands are rated only by whether your air blows over bedding, routes or food on the property (National Deer Association: keep your scent from blowing toward deer). Deer routes come from your own bedding and food marks.</p>';
   }
   function mount3d() {
     var el = $('#t3-root'); if (!el || !window.BLTerrain) return;
