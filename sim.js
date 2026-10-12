@@ -163,21 +163,34 @@
     return { H: H, W: W };
   }
   var WIND_VEC = { N: [0, 1], NE: [-0.707, 0.707], E: [-1, 0], SE: [-0.707, -0.707], S: [0, -1], SW: [0.707, -0.707], W: [1, 0], NW: [0.707, 0.707] }; // direction scent travels (wind FROM N blows south = +y)
+  // Stand colors, no distance (same rule as the 3D sim): follow your air from the stand downwind until it leaves the
+  // property; it fans +/- 22.5 deg, the width of one of the 8 wind directions you can pick. Red = it crosses bedding, the
+  // likely route or food where deer likely are this hour; yellow = it crosses only deer areas that are likely quiet now,
+  // or it's within 45 min of sunrise/sunset when air can flip; green = it crosses no deer area on the property.
+  // Which areas are active by time of day matches the 3D sim: night = food + routes; dawn/dusk = bedding + routes + food; midday = bedding.
+  function routeCells(P) {
+    var on = new Uint8Array(N); if (!P.haveRoute) return on;
+    for (var i = 0; i < N; i++) if (P.corr[i] >= 0.999 && P.map.cells[i] !== 'B' && P.map.cells[i] !== 'F') on[i] = 1;   // the least-cost bed-to-food path itself
+    return on;
+  }
   function standsEval(P, R, cond) {
-    var v = WIND_VEC[cond.wind] || [0, 1], c = P.map.cells;
+    var v = WIND_VEC[cond.wind] || [0, 1], c = P.map.cells, on = routeCells(P), light = R.W.light, h = cond.hour;
+    var flip = Math.abs(h - cond.rise) < 0.75 || Math.abs(h - cond.set) < 0.75;
+    var act = light === 'night' ? { F: 1, R: 1 } : light === 'day' ? { B: 1 } : { B: 1, F: 1, R: 1 };
     return P.map.stands.map(function (s, k) {
-      var odds = 0, n = 0, risk = 0, riskBed = false;
+      var odds = 0, n = 0, now = 0, quiet = 0, hitBed = false, hitRoute = false;
       for (var dy = -2; dy <= 2; dy++) for (var dx = -2; dx <= 2; dx++) { var x = s.x + dx, y = s.y + dy; if (x < 0 || y < 0 || x >= COLS || y >= ROWS) continue; odds += R.H[y * COLS + x]; n++; }
       odds = (odds / n) * R.W.act;
-      for (var i = 0; i < N; i++) {                                      // downwind cone: where your scent goes
+      for (var i = 0; i < N; i++) {
         var ddx = (i % COLS) - s.x, ddy = ((i / COLS) | 0) - s.y, d = Math.sqrt(ddx * ddx + ddy * ddy);
-        if (d < 1 || d > 6.5) continue;
-        var cos = (ddx * v[0] + ddy * v[1]) / d; if (cos < 0.8) continue;
-        var r = R.H[i] * (1 - d / 9); if (c[i] === 'B') { r = Math.max(r, 0.8 * (1 - d / 10)); riskBed = true; }
-        if (r > risk) risk = r;
+        if (d < 0.5) continue;
+        if ((ddx * v[0] + ddy * v[1]) / d < 0.9239) continue;            // cos 22.5 deg: inside the downwind fan, any distance
+        var kind = c[i] === 'B' ? 'B' : c[i] === 'F' ? 'F' : on[i] ? 'R' : '';
+        if (!kind) continue;
+        if (act[kind]) { now++; if (kind === 'B') hitBed = true; if (kind === 'R') hitRoute = true; } else quiet++;
       }
-      var color = risk > 0.52 ? 'red' : odds >= 0.28 ? 'green' : 'yellow';
-      return { i: k, name: s.name, x: s.x, y: s.y, odds: odds, risk: risk, riskBed: riskBed, color: color };
+      var color = now ? 'red' : (quiet || flip) ? 'yellow' : 'green';
+      return { i: k, name: s.name, x: s.x, y: s.y, odds: odds, riskBed: hitBed, riskRoute: hitRoute, quiet: quiet, flip: flip && !now, color: color };
     });
   }
   function fmtHour(h) { var hh = Math.floor(h) % 24, mm = Math.round((h - Math.floor(h)) * 60); if (mm === 60) { hh = (hh + 1) % 24; mm = 0; } return ((hh % 12) || 12) + ':' + (mm < 10 ? '0' : '') + mm + ' ' + (hh < 12 ? 'AM' : 'PM'); }
@@ -200,7 +213,7 @@
     if (cond.pressure === 'high') out.push('<b>High pressure:</b> hunted deer shift movement into the dark, avoid roads and hunted spots, and hold tighter in thick cover. Daytime food-plot use drops; night use stays.' + tag('GPS-collar research'));
     if (!P.haveRoute) out.push('<b>Add bedding cover and a food source</b> in Edit map to see travel routes between them.' + tag('model note'));
     var reds = stands.filter(function (s) { return s.color === 'red'; });
-    if (P.map.stands.length) out.push('<b>Wind from the ' + WIND_NAME[cond.wind] + '</b> carries your scent ' + TOWARD[cond.wind] + '. ' + (reds.length ? reds.map(function (s) { return esc(s.name); }).join(', ') + (reds.length > 1 ? ' are' : ' is') + ' red: scent would drift into ' + (reds.some(function (s) { return s.riskBed; }) ? 'bedding cover' : 'where deer likely are') + '.' : 'No stand blows scent into likely deer areas.') + ' Wind changes which stand to hunt; in this model it does not move the deer.' + tag('hunting practice + assumption'));
+    if (P.map.stands.length) out.push('<b>Wind from the ' + WIND_NAME[cond.wind] + '</b> carries your scent ' + TOWARD[cond.wind] + '. ' + (reds.length ? reds.map(function (s) { return esc(s.name); }).join(', ') + (reds.length > 1 ? ' are' : ' is') + ' red: your air blows over ' + (reds.some(function (s) { return s.riskBed; }) ? 'bedding cover' : 'a deer area') + ' where deer likely are now.' : 'No stand\u2019s air blows over a deer area where deer likely are now.') + ' Stands are rated by whether your air crosses bedding, the route or food anywhere on the property, not by any smell distance. Wind changes which stand to hunt; in this model it does not move the deer.' + tag('NDA: keep scent off deer'));
     return out;
   }
   function simulate(map, cond) { var P = prepare(map), R = heat(P, cond), st = standsEval(P, R, cond); return { P: P, R: R, stands: st, why: why(P, R, cond, st) }; }
@@ -267,7 +280,7 @@
         '<div class="bs-row" style="margin:0"><div class="bs-lab"><span>Show</span></div>' + seg('layer', [['heat', (layers.heat ? '✓ ' : '') + 'Heat map'], ['trails', (layers.trails ? '✓ ' : '') + 'Buck trails']].concat(host.visitCount ? [['visits', (layers.visits ? '✓ ' : '') + 'My cam visits']] : []), '', host.visitCount ? 3 : 2) + '</div></div>' +
         '<div class="bs-card" id="bs-stands"><h3>Stands right now</h3>' + (result.stands.length ? result.stands.map(function (s) {
           return '<div class="bs-stand" data-stand="' + s.i + '"><span class="bs-dot c-' + s.color + '"></span><span style="flex:1"><b>' + esc(s.name) + '</b><br><span style="font-size:12.5px;color:#6b6553">' +
-            (s.color === 'red' ? 'Bad wind: scent drifts into ' + (s.riskBed ? 'bedding' : 'likely deer areas') : s.color === 'green' ? 'Good wind, good odds' : 'Good wind, fair odds') + '</span></span><span style="font-size:12px;font-weight:700">' + Math.round(s.odds * 100) + '</span></div>';
+            (s.color === 'red' ? 'Bad wind: your air blows over ' + (s.riskBed ? 'bedding' : s.riskRoute ? 'the deer route' : 'the food') : s.color === 'green' ? 'Good wind: your air misses deer areas' : s.flip ? 'Air can flip near sunrise/sunset' : 'Air crosses deer areas that are likely quiet now') + '</span></span><span style="font-size:12px;font-weight:700">' + Math.round(s.odds * 100) + '</span></div>';
         }).join('') + '<p class="bs-note">Number = relative odds score (0–100) from the model for this hour, not a percent chance.</p>' : '<p class="bs-note">No stands yet. Add them in Edit map.</p>') + '</div>' +
         '<div class="bs-card" id="bs-whycard"><h3>Why the map looks like this</h3><ul class="bs-why" id="bs-why">' + result.why.map(function (l) { return '<li>' + l + '</li>'; }).join('') + '</ul>' +
         '<p class="bs-note"><b>This is a simple model, not a forecast.</b> It blends published averages from GPS-collar studies of whitetails with labeled assumptions. Real bucks on your land will differ. Use it to think through setups, and trust your own camera data first.</p></div>';
@@ -300,7 +313,7 @@
       if (wy) wy.innerHTML = result.why.map(function (l) { return '<li>' + l + '</li>'; }).join('');
       if (sd) sd.innerHTML = '<h3>Stands right now</h3>' + (result.stands.length ? result.stands.map(function (s) {
         return '<div class="bs-stand" data-stand="' + s.i + '"><span class="bs-dot c-' + s.color + '"></span><span style="flex:1"><b>' + esc(s.name) + '</b><br><span style="font-size:12.5px;color:#6b6553">' +
-          (s.color === 'red' ? 'Bad wind: scent drifts into ' + (s.riskBed ? 'bedding' : 'likely deer areas') : s.color === 'green' ? 'Good wind, good odds' : 'Good wind, fair odds') + '</span></span><span style="font-size:12px;font-weight:700">' + Math.round(s.odds * 100) + '</span></div>';
+          (s.color === 'red' ? 'Bad wind: your air blows over ' + (s.riskBed ? 'bedding' : s.riskRoute ? 'the deer route' : 'the food') : s.color === 'green' ? 'Good wind: your air misses deer areas' : s.flip ? 'Air can flip near sunrise/sunset' : 'Air crosses deer areas that are likely quiet now') + '</span></span><span style="font-size:12px;font-weight:700">' + Math.round(s.odds * 100) + '</span></div>';
       }).join('') + '<p class="bs-note">Number = relative odds score (0–100) from the model for this hour, not a percent chance.</p>' : '<p class="bs-note">No stands yet. Add them in Edit map.</p>');
       draw();
     }
