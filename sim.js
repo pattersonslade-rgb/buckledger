@@ -184,10 +184,10 @@
   var TOWARD = { N: 'south', NE: 'southwest', E: 'west', SE: 'northwest', S: 'north', SW: 'northeast', W: 'east', NW: 'southeast' };
   function why(P, R, cond, stands) {
     var W = R.W, out = [], tag = function (t) { return ' <span class="bs-src">' + t + '</span>'; };
-    var pct = function (r) { return r.hi == null ? 'over ' + Math.round(r.lo * 100) + '%' : 'about a third'; };
+    var pct = function (r) { return r.hi == null ? 'Over ' + Math.round(r.lo * 100) + '%' : 'About a third'; };
     out.push('Most movement comes around dawn and dusk; bucks bed most at midday.' + tag('MSU Deer Lab'));
     if (W.light === 'dawn' || W.light === 'dusk') out.push('<b>' + (W.light === 'dawn' ? 'Sunrise' : 'Sunset') + ' hour:</b> collared bucks show a flurry of activity at dawn and dusk' + (W.light === 'dusk' ? ', and they enter food plots most right around sunset' : '') + '. Bedding, the route and food are all shown as active. Research gives no width for this peak, so only the sunrise and sunset hours are marked.' + tag('MSU Deer Lab'));
-    else if (W.light === 'day') out.push('<b>Daylight:</b> bucks are bedded most by day, but they move every day in daylight too. Bedding and the route are shown as active.' + (W.dayShare ? ' About ' + pct(W.dayShare) + ' of buck movement happens in daylight in this phase.' : ' Research doesn\u2019t give a daylight share for the post-rut.') + tag('MSU Deer Lab'));
+    else if (W.light === 'day') out.push('<b>Daylight:</b> bucks are bedded most by day, but they move every day in daylight too. Bedding and the route are shown as active.' + (W.dayShare ? ' ' + pct(W.dayShare) + ' of buck movement happens in daylight in this phase.' : ' Research doesn\u2019t give a daylight share for the post-rut.') + tag('MSU Deer Lab'));
     else out.push('<b>Night:</b> most buck movement happens at night, so food and the route are shown as active.' + tag('MSU Deer Lab'));
     if (cond.season === 'early') out.push('<b>Early season:</b> about a third of movement in daylight (Oct-Nov). No early-season daily-distance number is published, so travel is not scaled.' + tag('MSU Deer Lab'));
     if (cond.season === 'prerut') out.push('<b>Pre-rut:</b> bucks travel about 4,800 yards (2.7 mi) a day. This is the baseline for the other phases.' + tag('MSU Deer Lab'));
