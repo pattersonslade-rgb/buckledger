@@ -1,0 +1,455 @@
+/* Buck Ledger 3D Terrain Sim (Elite). Canvas painter renderer, phone first.
+ * Elevation: USGS 3DEP (fetched once, on a tap, for your property box; US only), cached on the phone.
+ * Air: hourly wind/cloud/temp for the picked day (Open-Meteo, on a tap) or your own wind pick.
+ * Physics (all labeled in the research doc):
+ *   - Pasquill-Gifford stability class by Turner's method (EPA-454/R-99-005, Tables 6-4..6-6)
+ *   - Briggs (1973) open-country plume spread, Gaussian plume ground level (Turner 1970)
+ *   - Thermals: daytime upslope / night downslope (cold-air drainage) flow, blended with the wind
+ *   - Deer routes: least-cost paths between YOUR bedding and food marks over the real slope
+ * Rules: no numbers, no graphs and no trail-cam photos inside the 3D view. Plain words only. */
+(function () {
+  'use strict';
+  var COLS = 20, ROWS = 26, K = 4, NX = COLS * K, NY = ROWS * K, D2R = Math.PI / 180;
+  function clamp(x, a, b) { return x < a ? a : x > b ? b : x; }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+
+  /* ---------- 3DEP: box, URL, TIFF ---------- */
+  // box: { lat, lng, acres } -> bbox around the centre, aspect = 2D map (20 wide x 26 tall), north up
+  function bbox(box) {
+    var area = box.acres * 4046.86, w = Math.sqrt(area / (ROWS / COLS)), h = w * ROWS / COLS;
+    var dLat = h / 2 / 111320, dLng = w / 2 / (111320 * Math.cos(box.lat * D2R));
+    return { w: box.lng - dLng, s: box.lat - dLat, e: box.lng + dLng, n: box.lat + dLat, wm: w, hm: h };
+  }
+  function demURL(box) {
+    var b = bbox(box);
+    return 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox=' +
+      [b.w, b.s, b.e, b.n].map(function (v) { return v.toFixed(6); }).join(',') +
+      '&bboxSR=4326&imageSR=4326&size=' + NX + ',' + NY + '&format=tiff&pixelType=F32&noData=-9999&interpolation=RSP_BilinearInterpolation&compression=None&f=image';
+  }
+  function parseTiff(buf) {
+    var v = new DataView(buf), le;
+    var bo = v.getUint16(0); if (bo === 0x4949) le = true; else if (bo === 0x4d4d) le = false; else throw new Error('not a TIFF');
+    if (v.getUint16(2, le) !== 42) throw new Error('not a classic TIFF');
+    var ifd = v.getUint32(4, le), n = v.getUint16(ifd, le), T = {};
+    var SZ = { 1: 1, 2: 1, 3: 2, 4: 4, 6: 1, 8: 2, 9: 4, 11: 4, 12: 8, 16: 8 };
+    for (var i = 0; i < n; i++) {
+      var e = ifd + 2 + i * 12, tag = v.getUint16(e, le), type = v.getUint16(e + 2, le), cnt = v.getUint32(e + 4, le), sz = SZ[type] || 1;
+      var off = cnt * sz <= 4 ? e + 8 : v.getUint32(e + 8, le), vals = [];
+      for (var k = 0; k < Math.min(cnt, 1e6); k++) {
+        var o = off + k * sz;
+        vals.push(type === 3 || type === 8 ? v.getUint16(o, le) : type === 4 || type === 9 ? v.getUint32(o, le) : type === 1 || type === 2 || type === 6 ? v.getUint8(o) : type === 11 ? v.getFloat32(o, le) : type === 12 ? v.getFloat64(o, le) : 0);
+      }
+      T[tag] = vals;
+    }
+    var W = T[256][0], H = T[257][0], bps = (T[258] || [32])[0], comp = (T[259] || [1])[0], fmt = (T[339] || [3])[0], spp = (T[277] || [1])[0];
+    if (comp !== 1) throw new Error('compressed TIFF not supported');
+    if (bps !== 32 || fmt !== 3 || spp !== 1) throw new Error('expected one float32 band');
+    var out = new Float32Array(W * H);
+    if (T[322]) {   // tiled
+      var tw = T[322][0], th = T[323][0], offs = T[324], across = Math.ceil(W / tw);
+      offs.forEach(function (o, t) {
+        var tx = (t % across) * tw, ty = Math.floor(t / across) * th;
+        for (var y = 0; y < th; y++) for (var x = 0; x < tw; x++) {
+          var X = tx + x, Y = ty + y; if (X >= W || Y >= H) continue;
+          out[Y * W + X] = v.getFloat32(o + (y * tw + x) * 4, le);
+        }
+      });
+    } else {        // strips
+      var rps = (T[278] || [H])[0], so = T[273];
+      so.forEach(function (o, s) { for (var y = 0; y < rps; y++) { var Y = s * rps + y; if (Y >= H) break; for (var x = 0; x < W; x++) out[Y * W + x] = v.getFloat32(o + (y * W + x) * 4, le); } });
+    }
+    return { w: W, h: H, z: out };
+  }
+  // clean elevation: fill noData from neighbours; null if mostly missing (outside the US)
+  function cleanDem(d) {
+    if (!d || d.w !== NX || d.h !== NY) return null;
+    var z = Float32Array.from(d.z), bad = 0, i;
+    for (i = 0; i < z.length; i++) if (!(z[i] > -500 && z[i] < 9000)) { z[i] = NaN; bad++; }
+    if (bad > z.length * 0.2) return null;
+    for (var pass = 0; pass < 50 && bad; pass++) {
+      bad = 0;
+      for (i = 0; i < z.length; i++) if (isNaN(z[i])) {
+        var x = i % NX, y = (i / NX) | 0, s = 0, c = 0;
+        [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(function (o) { var X = x + o[0], Y = y + o[1]; if (X >= 0 && Y >= 0 && X < NX && Y < NY && !isNaN(z[Y * NX + X])) { s += z[Y * NX + X]; c++; } });
+        if (c) z[i] = s / c; else bad++;
+      }
+    }
+    return z;
+  }
+  // Example terrain for the demo: made up, smooth ridge + draw. NOT a real place.
+  function exampleDem() {
+    var z = new Float32Array(NX * NY);
+    for (var y = 0; y < NY; y++) for (var x = 0; x < NX; x++) {
+      var u = x / NX, w = y / NY;
+      z[y * NX + x] = 120 + 22 * Math.sin(u * 3.1 + 0.4) * Math.cos(w * 2.2) + 14 * Math.exp(-((u - 0.7) * (u - 0.7) + (w - 0.3) * (w - 0.3)) / 0.03) - 10 * Math.exp(-Math.pow(u - 0.35 - 0.1 * Math.sin(w * 6), 2) / 0.004) + 6 * w;
+    }
+    return z;
+  }
+
+  /* ---------- sun + stability ---------- */
+  function sunElev(date, lat, lng) {   // NOAA simplified (degrees), good to ~0.1 deg
+    var jd = date.getTime() / 864e5 + 2440587.5, n = jd - 2451545, L = (280.46 + 0.9856474 * n) % 360, g = (357.528 + 0.9856003 * n) * D2R;
+    var lam = (L + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * D2R, eps = (23.439 - 4e-7 * n) * D2R;
+    var dec = Math.asin(Math.sin(eps) * Math.sin(lam)), ra = Math.atan2(Math.cos(eps) * Math.sin(lam), Math.cos(lam));
+    var gmst = (18.697374558 + 24.06570982441908 * n) % 24, ha = (gmst * 15 + lng) * D2R - ra;
+    return Math.asin(Math.sin(lat * D2R) * Math.sin(dec) + Math.cos(lat * D2R) * Math.cos(dec) * Math.cos(ha)) / D2R;
+  }
+  var TURNER = [[1, 1, 2, 3, 4, 6, 7], [1, 2, 2, 3, 4, 6, 7], [1, 2, 3, 4, 4, 5, 6], [2, 2, 3, 4, 4, 5, 6], [2, 2, 3, 4, 4, 4, 5], [2, 3, 3, 4, 4, 4, 5], [3, 3, 4, 4, 4, 4, 5], [3, 3, 4, 4, 4, 4, 4], [3, 4, 4, 4, 4, 4, 4]];
+  function stability(u10, elev, cloudPct, nightish) {   // 1=A (very unstable) .. 6=F (very stable)
+    var kt = Math.round(u10 / 0.514444), row = kt <= 1 ? 0 : kt <= 3 ? 1 : kt <= 5 ? 2 : kt === 6 ? 3 : kt === 7 ? 4 : kt <= 9 ? 5 : kt === 10 ? 6 : kt === 11 ? 7 : 8;
+    var ct = Math.round(clamp(cloudPct, 0, 100) / 10), nri;
+    if (nightish) nri = ct <= 4 ? -2 : -1;
+    else { var ic = elev > 60 ? 4 : elev > 35 ? 3 : elev > 15 ? 2 : 1; nri = ct <= 5 ? ic : Math.max(1, ic - 1 - (ct >= 10 ? 1 : 0)); }   // ceiling unknown: treated as mid-level cloud
+    return Math.min(6, TURNER[row][[4, 3, 2, 1, 0, -1, -2].indexOf(nri)]);
+  }
+  function briggs(cls, x) {
+    var r = Math.pow(1 + 0.0001 * x, -0.5);
+    switch (cls) {
+      case 1: return { sy: 0.22 * x * r, sz: 0.20 * x };
+      case 2: return { sy: 0.16 * x * r, sz: 0.12 * x };
+      case 3: return { sy: 0.11 * x * r, sz: 0.08 * x * Math.pow(1 + 0.0002 * x, -0.5) };
+      case 4: return { sy: 0.08 * x * r, sz: 0.06 * x * Math.pow(1 + 0.0015 * x, -0.5) };
+      case 5: return { sy: 0.06 * x * r, sz: 0.03 * x / (1 + 0.0003 * x) };
+      default: return { sy: 0.04 * x * r, sz: 0.016 * x / (1 + 0.0003 * x) };
+    }
+  }
+  function chi(cls, x, u, H) { var s = briggs(cls, Math.max(x, 5)); return Math.exp(-H * H / (2 * s.sz * s.sz)) / (Math.PI * s.sy * s.sz * Math.max(u, 0.5)); }
+  // Reference: scent level 300 m downwind of a ground source, neutral air (D), 2 m/s. Above this = "deer can likely smell it".
+  var CHI_REF = chi(4, 300, 2, 0);
+
+  /* ---------- terrain fields ---------- */
+  function fields(z, wm, hm) {
+    var dx = wm / NX, dy = hm / NY, gx = new Float32Array(NX * NY), gy = new Float32Array(NX * NY), sl = new Float32Array(NX * NY), mn = 1e9, mx = -1e9;
+    for (var y = 0; y < NY; y++) for (var x = 0; x < NX; x++) {
+      var i = y * NX + x, xl = Math.max(0, x - 1), xr = Math.min(NX - 1, x + 1), yu = Math.max(0, y - 1), yd = Math.min(NY - 1, y + 1);
+      gx[i] = (z[y * NX + xr] - z[y * NX + xl]) / ((xr - xl) * dx); gy[i] = (z[yd * NX + x] - z[yu * NX + x]) / ((yd - yu) * dy);
+      sl[i] = Math.sqrt(gx[i] * gx[i] + gy[i] * gy[i]); if (z[i] < mn) mn = z[i]; if (z[i] > mx) mx = z[i];
+    }
+    // low spots: below the mean of a 5x5 neighbourhood (where cold air pools)
+    var low = new Float32Array(NX * NY);
+    for (y = 0; y < NY; y++) for (x = 0; x < NX; x++) {
+      var s = 0, c = 0; for (var oy = -3; oy <= 3; oy++) for (var ox = -3; ox <= 3; ox++) { var X = x + ox, Y = y + oy; if (X >= 0 && Y >= 0 && X < NX && Y < NY) { s += z[Y * NX + X]; c++; } }
+      low[y * NX + x] = s / c - z[y * NX + x];
+    }
+    return { dx: dx, dy: dy, gx: gx, gy: gy, sl: sl, min: mn, max: mx, low: low };
+  }
+  function zoneAt(map, x, y) { return map ? map.cells[((y / K) | 0) * COLS + ((x / K) | 0)] : '.'; }
+
+  /* ---------- the hour: air flow ---------- */
+  // air: { wd (deg, FROM), ws (mph), cc (cloud %), t (F) } ; ctx: { lat, lng, date (hour) }
+  function airAt(air, date, lat, lng, rise, set) {
+    var u10 = (air.ws || 0) * 0.44704, el = sunElev(date, lat, lng), t = date.getTime();
+    var nightish = rise && set ? (t < rise.getTime() + 36e5 || t > set.getTime() - 36e5) : el < 10;
+    var cls = stability(u10, el, air.cc == null ? 30 : air.cc, nightish);
+    var mode = el > 8 && !nightish ? 'up' : (el < -1 || cls >= 5) ? 'down' : 'mixed';
+    if (rise && set && (Math.abs(t - rise.getTime()) < 45 * 6e4 || Math.abs(t - set.getTime()) < 45 * 6e4)) mode = 'mixed';
+    var to = (air.wd + 180) * D2R;
+    return { u10: u10, el: el, cls: cls, mode: mode, tx: Math.sin(to), ty: -Math.cos(to), calm: u10 < 1.0 };
+  }
+  function flowAt(F, A, i) {
+    // wind near the ground under cover is a fraction of the 10 m wind; slope flow adds where the ground tilts
+    var uw = A.u10 * 0.45, th = A.mode === 'down' ? 1.0 : A.mode === 'up' ? 0.9 * clamp(A.el / 30, 0.3, 1) : 0.2;
+    var sf = clamp(F.sl[i] / 0.08, 0, 1), dir = A.mode === 'up' ? 1 : -1;
+    var gx = F.gx[i], gy = F.gy[i], gl = F.sl[i] || 1;
+    var vx = uw * A.tx + th * sf * dir * gx / gl, vy = uw * A.ty + th * sf * dir * gy / gl;
+    return [vx, vy];
+  }
+  // follow the air from (x0,y0) in DEM cells; returns points with distance (m)
+  function trace(F, A, x0, y0, maxM) {
+    var pts = [], x = x0, y = y0, d = 0, step = Math.min(F.dx, F.dy);
+    for (var k = 0; k < 400 && d < maxM; k++) {
+      var i = clamp(Math.round(y), 0, NY - 1) * NX + clamp(Math.round(x), 0, NX - 1), v = flowAt(F, A, i), sp = Math.sqrt(v[0] * v[0] + v[1] * v[1]);
+      if (sp < 0.05) break;
+      x += v[0] / sp * step / F.dx; y += v[1] / sp * step / F.dy; d += step;
+      if (x < 0 || y < 0 || x > NX - 1 || y > NY - 1) break;
+      pts.push({ x: x, y: y, d: d, u: Math.max(sp, 0.5), nx: -v[1] / sp, ny: v[0] / sp });
+    }
+    return pts;
+  }
+  // scent grid from one source; H = height of the scent source (m)
+  function plume(F, A, x0, y0, H, maxM) {
+    var g = new Float32Array(NX * NY), pts = trace(F, A, x0, y0, maxM || 700);
+    pts.forEach(function (p) {
+      var s = briggs(A.cls, p.d), c = chi(A.cls, p.d, p.u, H) / CHI_REF, span = Math.min(3 * s.sy, 250);
+      var steps = Math.max(1, Math.ceil(span / F.dx));
+      for (var k = -steps; k <= steps; k++) {
+        var off = k * span / steps, X = Math.round(p.x + p.nx * off / F.dx), Y = Math.round(p.y + p.ny * off / F.dy);
+        if (X < 0 || Y < 0 || X >= NX || Y >= NY) continue;
+        var val = c * Math.exp(-off * off / (2 * s.sy * s.sy)); if (val > g[Y * NX + X]) g[Y * NX + X] = val;
+      }
+    });
+    if (A.calm) { // light and variable: scent pools around the source in every direction
+      for (var y = 0; y < NY; y++) for (var x = 0; x < NX; x++) { var dd = Math.hypot((x - x0) * F.dx, (y - y0) * F.dy); if (dd < 90) g[y * NX + x] = Math.max(g[y * NX + x], 1.5 * (1 - dd / 90)); }
+    }
+    return { g: g, pts: pts };
+  }
+
+  /* ---------- deer: where they likely are this hour ---------- */
+  function phase(date, rise, set) {
+    if (!rise || !set) { var h = date.getHours(); return h < 5 || h >= 21 ? 'night' : h < 9 ? 'morning' : h < 15 ? 'midday' : 'evening'; }
+    var t = date.getTime(), r = rise.getTime(), s = set.getTime();
+    if (t < r - 90 * 6e4 || t > s + 90 * 6e4) return 'night';
+    if (t < r + 150 * 6e4) return 'morning';
+    if (t > s - 180 * 6e4) return 'evening';
+    return 'midday';
+  }
+  var WEIGHT = { night: { B: 0.3, F: 1, R: 0.6 }, morning: { B: 1, F: 0.6, R: 1 }, midday: { B: 1, F: 0.2, R: 0.4 }, evening: { B: 0.8, F: 0.9, R: 1 } };
+  function comps(map, ch) {   // connected groups of one zone on the 2D map (in map cells)
+    var seen = {}, out = [];
+    for (var i = 0; i < COLS * ROWS; i++) {
+      if (map.cells[i] !== ch || seen[i]) continue;
+      var q = [i], cells = []; seen[i] = 1;
+      while (q.length) { var j = q.pop(), x = j % COLS, y = (j / COLS) | 0; cells.push(j); [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(function (o) { var X = x + o[0], Y = y + o[1], n = Y * COLS + X; if (X >= 0 && Y >= 0 && X < COLS && Y < ROWS && !seen[n] && map.cells[n] === ch) { seen[n] = 1; q.push(n); } }); }
+      out.push(cells);
+    }
+    return out;
+  }
+  function dijkstra(cost, starts) {   // simple binary-heap Dijkstra over DEM cells, 8 neighbours
+    var N = NX * NY, dist = new Float64Array(N).fill(Infinity), prev = new Int32Array(N).fill(-1), heap = [];
+    function push(d, i) { heap.push([d, i]); var k = heap.length - 1; while (k) { var p = (k - 1) >> 1; if (heap[p][0] <= heap[k][0]) break; var t = heap[p]; heap[p] = heap[k]; heap[k] = t; k = p; } }
+    function pop() { var top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; var k = 0; for (;;) { var l = 2 * k + 1, r = l + 1, m = k; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === k) break; var t = heap[m]; heap[m] = heap[k]; heap[k] = t; k = m; } } return top; }
+    starts.forEach(function (s) { dist[s] = 0; push(0, s); });
+    while (heap.length) {
+      var it = pop(), d = it[0], i = it[1]; if (d > dist[i]) continue;
+      var x = i % NX, y = (i / NX) | 0;
+      for (var oy = -1; oy <= 1; oy++) for (var ox = -1; ox <= 1; ox++) {
+        if (!ox && !oy) continue; var X = x + ox, Y = y + oy; if (X < 0 || Y < 0 || X >= NX || Y >= NY) continue;
+        var j = Y * NX + X, nd = d + (cost[i] + cost[j]) / 2 * (ox && oy ? 1.414 : 1);
+        if (nd < dist[j]) { dist[j] = nd; prev[j] = i; push(nd, j); }
+      }
+    }
+    return { dist: dist, prev: prev };
+  }
+  function centreOf(cells) { var sx = 0, sy = 0; cells.forEach(function (j) { sx += j % COLS; sy += (j / COLS) | 0; }); return [Math.round((sx / cells.length + 0.5) * K), Math.round((sy / cells.length + 0.5) * K)]; }
+  function routes(map, F) {
+    // deer cost: steep slopes cost more; funnels and creek bottoms are easy; roads and neighbor lines are avoided
+    var cost = new Float32Array(NX * NY);
+    for (var i = 0; i < NX * NY; i++) {
+      var z = zoneAt(map, i % NX, (i / NX) | 0);
+      cost[i] = 1 + 8 * Math.min(F.sl[i], 0.6) + (z === 'R' ? 6 : z === 'X' ? 4 : z === 'N' ? -0.5 : z === 'C' ? 0.5 : z === 'F' ? 0.6 : 0);
+    }
+    var beds = comps(map, 'B'), foods = comps(map, 'F'), out = [];
+    if (!beds.length || !foods.length) return out;
+    var starts = []; foods.forEach(function (c) { c.forEach(function (j) { var p = [((j % COLS) + 0.5) * K | 0, (((j / COLS) | 0) + 0.5) * K | 0]; starts.push(p[1] * NX + p[0]); }); });
+    var D = dijkstra(cost, starts);
+    beds.slice(0, 6).forEach(function (b) {
+      var c = centreOf(b), i = clamp(c[1], 0, NY - 1) * NX + clamp(c[0], 0, NX - 1), path = [];
+      for (var g = 0; i >= 0 && g < 4000; g++) { path.push(i); i = D.prev[i]; }
+      if (path.length > 2) out.push(path);   // from bedding to food
+    });
+    return out;
+  }
+
+  /* ---------- the whole hour ---------- */
+  function model(T, air, date) {
+    var map = T.map, F = T.F, A = airAt(air, date, T.lat, T.lng, T.rise, T.set), ph = phase(date, T.rise, T.set), W = WEIGHT[ph];
+    var deer = new Float32Array(NX * NY), onRoute = new Uint8Array(NX * NY);
+    T.routes.forEach(function (r) { r.forEach(function (i) { for (var oy = -1; oy <= 1; oy++) for (var ox = -1; ox <= 1; ox++) { var x = i % NX + ox, y = ((i / NX) | 0) + oy; if (x >= 0 && y >= 0 && x < NX && y < NY) onRoute[y * NX + x] = 1; } }); });
+    for (var i = 0; i < NX * NY; i++) { var z = zoneAt(map, i % NX, (i / NX) | 0); deer[i] = Math.max(z === 'B' ? W.B : z === 'F' ? W.F : 0, onRoute[i] ? W.R : 0); }
+    var stands = (map.stands || []).map(function (s) {
+      var x0 = s.x * K + K / 2, y0 = s.y * K + K / 2, P = plume(F, A, x0, y0, 6, 700), strong = 0, faint = 0, hitB = 0, hitR = 0, hitF = 0;
+      for (var j = 0; j < NX * NY; j++) {
+        var c = P.g[j]; if (c < 1 || deer[j] < 0.6) continue;
+        var z = zoneAt(map, j % NX, (j / NX) | 0);
+        if (c >= 3) strong++; else faint++;
+        if (z === 'B') hitB++; else if (z === 'F') hitF++; else if (onRoute[j]) hitR++;
+      }
+      var color = strong >= 3 ? 'red' : (strong || faint >= 4 || A.calm || A.mode === 'mixed') ? 'yellow' : 'green';
+      return { name: s.name, x: x0, y: y0, plume: P, color: color, hitB: hitB, hitR: hitR, hitF: hitF, strong: strong };
+    });
+    return { A: A, phase: ph, deer: deer, onRoute: onRoute, stands: stands };
+  }
+  // safest walk-in from the closest parking spot to a stand
+  function walkIn(T, M, s) {
+    if (!T.parking.length) return null;
+    var F = T.F, A = M.A, cost = new Float32Array(NX * NY);
+    // exposure: does the air from this spot carry your scent into deer areas within ~200 m?
+    for (var y = 0; y < NY; y += 2) for (var x = 0; x < NX; x += 2) {
+      var pts = trace(F, A, x, y, 200), bad = 0;
+      for (var k = 0; k < pts.length; k += 2) { var j = Math.round(pts[k].y) * NX + Math.round(pts[k].x); if (M.deer[j] >= 0.6) { bad = 1; break; } }
+      for (var oy = 0; oy < 2; oy++) for (var ox = 0; ox < 2; ox++) if (y + oy < NY && x + ox < NX) cost[(y + oy) * NX + x + ox] = bad;
+    }
+    for (var i = 0; i < NX * NY; i++) {
+      var z = zoneAt(T.map, i % NX, (i / NX) | 0);
+      cost[i] = 1 + cost[i] * 25 + (M.onRoute[i] ? 6 : 0) + (z === 'B' ? 60 : 0) + (z === 'F' && M.phase !== 'midday' ? 8 : 0) + (z === 'X' ? 40 : 0) + 3 * Math.min(F.sl[i], 0.6);
+    }
+    var goal = clamp(Math.round(s.y), 0, NY - 1) * NX + clamp(Math.round(s.x), 0, NX - 1), D = dijkstra(cost, [goal]), best = null;
+    T.parking.forEach(function (p) { var j = clamp(p.y * K + 2, 0, NY - 1) * NX + clamp(p.x * K + 2, 0, NX - 1); if (!best || D.dist[j] < D.dist[best]) best = j; });
+    var path = [], i2 = best, exposed = 0, crosses = 0;
+    for (var g = 0; i2 >= 0 && g < 5000; g++) { path.push(i2); if (cost[i2] >= 25) exposed++; if (M.onRoute[i2]) crosses++; i2 = D.prev[i2]; }
+    return { path: path, exposed: exposed, crosses: crosses, from: best };
+  }
+  var DIR8 = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
+  function dirWord(dx, dy) { var a = (Math.atan2(dx, -dy) / D2R + 360) % 360; return DIR8[Math.round(a / 45) % 8]; }
+  function reasons(T, M, s, w) {
+    var A = M.A, out = [], wind = A.calm ? 'Calm, shifting air' : 'Wind from the ' + DIR8[Math.round(((A.tx === 0 && A.ty === 0) ? 0 : ((Math.atan2(-A.tx, A.ty) / D2R) + 360) % 360) / 45) % 8];
+    out.push(wind + (A.mode === 'down' ? ', and cooling air is sinking downhill.' : A.mode === 'up' ? ', and warming air is rising uphill.' : ', and the air is switching between rising and sinking.'));
+    if (s.color === 'red') out.push('Your scent drifts into ' + (s.hitB ? 'bedding' : s.hitR ? 'a deer route' : 'the food') + ' where deer should be now. Skip this stand this hour.');
+    else if (s.color === 'yellow') out.push(A.calm ? 'With almost no wind, scent pools around the stand and can swirl.' : A.mode === 'mixed' ? 'Around sunrise and sunset the air can flip. Scent may swirl.' : 'Some faint scent reaches deer areas. Hunt it with care.');
+    else out.push('Your scent stays off bedding, food and the routes this hour.');
+    if (A.mode === 'down' && s.color !== 'green') out.push('Cold air drains into low ground and carries scent with it.');
+    if (w === null) out.push('Mark where you park to get a walk-in.');
+    else if (w) {
+      var p = w.from, dx = (p % NX) - s.x, dy = ((p / NX) | 0) - s.y;
+      out.push('Safest walk-in comes from the ' + dirWord(dx, dy) + (w.exposed ? '. No path is fully clean; part of it blows toward deer.' : '. It keeps your scent off where deer should be.') + (w.crosses ? ' It has to cross a deer route.' : ''));
+    }
+    return out;
+  }
+  var PHASE_WORD = { night: 'Night: deer likely on food and moving.', morning: 'Morning: deer likely heading from food back to bed.', midday: 'Midday: deer likely bedded.', evening: 'Evening: deer likely getting up and heading to food.' };
+
+  /* ---------- rendering (painter's algorithm) ---------- */
+  var ZCOL = { B: [52, 92, 46], F: [196, 168, 78], W: [70, 128, 170], C: [64, 118, 160], N: [120, 140, 70], R: [150, 140, 128], X: [150, 80, 70], '.': [104, 128, 76] };
+  function mount(el, host) {
+    var T = null, view = { yaw: -0.5, pitch: 0.95 }, hour = host.hour == null ? 17 : host.hour, day = host.day || new Date(), sel = 0, M = null, W = null, raf = 0, parts = [], dead = false, buf = null, bufKey = '';
+    var demo = !!host.demo;
+    el.innerHTML = '<div class="t3">' + (demo ? '<div class="t3-demo">Demo on a made-up example property. Not a real place.</div>' : '') +
+      '<div class="t3-stage"><canvas class="t3-cv" aria-label="3D terrain view"></canvas><div class="t3-phase" aria-live="polite"></div></div>' +
+      '<div class="t3-ctl"><label class="t3-scrub"><span class="t3-when"></span><input type="range" min="0" max="23" step="1" class="t3-hour" aria-label="Time of day"></label>' +
+      '<div class="t3-row">' + (demo ? '' : '<label class="field t3-day"><span>Day</span><input type="date" class="t3-date"></label>') +
+      '<button class="btn sm ink" data-t3="turn">Turn</button><button class="btn sm ink" data-t3="top">Top view</button></div>' +
+      '<div class="t3-air"></div><div class="t3-stands"></div><ul class="t3-why read"></ul></div></div>';
+    var cv = el.querySelector('canvas'), g = cv.getContext('2d'), hr = el.querySelector('.t3-hour'), dt = el.querySelector('.t3-date');
+    hr.value = hour; if (dt) dt.value = ymd(day);
+    function ymd(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
+    function setup() {
+      var z = host.dem(), map = host.map(), box = host.box();
+      if (!z || !map || !box) { T = null; return; }
+      var b = bbox(box), F = fields(z, b.wm, b.hm), st = host.sunTimes(day);
+      T = { z: z, map: map, F: F, lat: box.lat, lng: box.lng, wm: b.wm, hm: b.hm, rise: st && st.rise, set: st && st.set, parking: host.parking() || [] };
+      T.routes = routes(map, F);
+      var rel = Math.max(F.max - F.min, 1); T.ex = clamp(0.16 * b.wm / rel, 1, 6);
+      bufKey = '';
+    }
+    function when(h) {
+      var d = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, 0, 0);
+      return d;
+    }
+    function hourWord(d) {
+      var p = phase(d, T && T.rise, T && T.set), t = d.getTime(), r = T && T.rise, s = T && T.set;
+      if (r && Math.abs(t - r.getTime()) <= 40 * 6e4) return 'Around sunrise';
+      if (s && Math.abs(t - s.getTime()) <= 40 * 6e4) return 'Around sunset';
+      var h = d.getHours();
+      return p === 'night' ? (h < 12 ? 'Before dawn' : 'After dark') : p === 'morning' ? 'Early morning' : p === 'midday' ? (h < 12 ? 'Late morning' : 'Midday') : 'Late afternoon';
+    }
+    function compute() {
+      if (!T) return;
+      var d = when(hour), air = host.air(d) || host.manualAir();
+      M = model(T, air, d);
+      var s = M.stands[sel]; W = s ? walkIn(T, M, s) : undefined;
+      el.querySelector('.t3-when').textContent = hourWord(d);
+      el.querySelector('.t3-phase').textContent = PHASE_WORD[M.phase];
+      el.querySelector('.t3-air').innerHTML = host.airNote ? host.airNote(d) : '';
+      el.querySelector('.t3-stands').innerHTML = M.stands.length ? M.stands.map(function (s2, k) { return '<button class="t3-st ' + s2.color + (k === sel ? ' on' : '') + '" data-t3st="' + k + '"><i></i>' + esc(s2.name) + '</button>'; }).join('') : '<p class="small muted">No stands yet. Add them in the 2D map editor.</p>';
+      el.querySelector('.t3-why').innerHTML = s ? reasons(T, M, s, W).map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') : '';
+      bufKey = ''; seed();
+    }
+    // projection
+    function size() { var w = el.clientWidth || 360, h = Math.round(Math.min(w * 0.95, 520)), r = Math.min(window.devicePixelRatio || 1, 2); cv.width = w * r; cv.height = h * r; cv.style.height = h + 'px'; g.setTransform(r, 0, 0, r, 0, 0); return { w: w, h: h }; }
+    var S = size();
+    function proj(x, y, zz) {   // x,y in DEM cells, zz in metres
+      var X = (x - NX / 2) * T.F.dx, Y = (y - NY / 2) * T.F.dy, Z = (zz - (T.F.min + T.F.max) / 2) * T.ex;
+      var c = Math.cos(view.yaw), s = Math.sin(view.yaw), xr = c * X - s * Y, yr = s * X + c * Y;
+      var sc = Math.min(S.w, S.h) / (Math.max(T.wm, T.hm) * 1.05);
+      return [S.w / 2 + xr * sc, S.h / 2 + (yr * Math.sin(view.pitch) - Z * Math.cos(view.pitch)) * sc, yr * Math.cos(view.pitch) + Z * Math.sin(view.pitch)];
+    }
+    function zAt(x, y) { var X = clamp(Math.round(x), 0, NX - 1), Y = clamp(Math.round(y), 0, NY - 1); return T.z[Y * NX + X]; }
+    function terrain() {
+      var key = view.yaw.toFixed(3) + view.pitch.toFixed(3) + S.w + 'x' + S.h + (M ? M.phase + sel : '');
+      if (buf && key === bufKey) return;
+      bufKey = key; buf = buf || document.createElement('canvas'); buf.width = cv.width; buf.height = cv.height;
+      var b = buf.getContext('2d'), r = cv.width / S.w; b.setTransform(r, 0, 0, r, 0, 0); b.clearRect(0, 0, S.w, S.h);
+      var step = 2, quads = [], sunEl = M ? M.A.el : 30, night = sunEl < -2, scent = M && M.stands[sel] ? M.stands[sel].plume.g : null;
+      var lx = -0.5, ly = -0.6, lz = 0.62;   // light from the northwest-above (map shading)
+      for (var y = 0; y < NY - step; y += step) for (var x = 0; x < NX - step; x += step) {
+        var p1 = proj(x, y, zAt(x, y)), p2 = proj(x + step, y, zAt(x + step, y)), p3 = proj(x + step, y + step, zAt(x + step, y + step)), p4 = proj(x, y + step, zAt(x, y + step));
+        var i = (y + 1) * NX + x + 1, nx = -T.F.gx[i] * T.ex, ny = -T.F.gy[i] * T.ex, nl = Math.sqrt(nx * nx + ny * ny + 1), sh = clamp((nx * lx + ny * ly + lz) / nl / 0.62, 0.35, 1.25);
+        var zc = ZCOL[zoneAt(T.map, x + 1, y + 1)] || ZCOL['.'], col = [zc[0] * sh, zc[1] * sh, zc[2] * sh];
+        if (M && M.deer[i] >= 0.6 && zoneAt(T.map, x + 1, y + 1) === '.') col = [col[0] * 0.9 + 30, col[1] * 0.9 + 22, col[2] * 0.9];
+        if (M && M.A.mode === 'down' && T.F.low[i] > 0.6) col = [col[0] * 0.75, col[1] * 0.8, col[2] * 0.8 + 50];   // cold air pooling
+        if (scent) { var sv = Math.max(scent[i], scent[i + 1] || 0, scent[i + NX] || 0); if (sv >= 1) { var a = sv >= 3 ? 0.6 : 0.35; col = [col[0] * (1 - a) + 240 * a, col[1] * (1 - a) + 120 * a, col[2] * (1 - a) + 40 * a]; } }
+        if (night) col = [col[0] * 0.55, col[1] * 0.6, col[2] * 0.75 + 12];
+        quads.push({ d: (p1[2] + p2[2] + p3[2] + p4[2]) / 4, p: [p1, p2, p3, p4], c: 'rgb(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ')' });
+      }
+      quads.sort(function (a, c) { return a.d - c.d; });
+      quads.forEach(function (q) { b.beginPath(); b.moveTo(q.p[0][0], q.p[0][1]); for (var k = 1; k < 4; k++) b.lineTo(q.p[k][0], q.p[k][1]); b.closePath(); b.fillStyle = q.c; b.fill(); b.strokeStyle = q.c; b.lineWidth = 0.6; b.stroke(); });
+    }
+    function seed() { parts = []; if (!M || !M.stands[sel]) return; var s = M.stands[sel]; for (var k = 0; k < 90; k++) parts.push({ x: s.x, y: s.y, age: Math.random() * 120 }); }
+    function frame(ts) {
+      if (dead) return;
+      if (!T) { g.clearRect(0, 0, S.w, S.h); return; }
+      terrain(); g.clearRect(0, 0, S.w, S.h); g.drawImage(buf, 0, 0, S.w, S.h);
+      var t = (ts || 0) / 1000;
+      // deer routes: moving arrows (bed -> food in the evening and night, food -> bed in the morning)
+      if (M) T.routes.forEach(function (r) {
+        var rev = M.phase === 'morning' || M.phase === 'midday', pts = rev ? r.slice().reverse() : r, a = M.phase === 'midday' ? 0.35 : 0.95;
+        g.strokeStyle = 'rgba(255,248,225,' + (a * 0.5) + ')'; g.lineWidth = 2; g.beginPath();
+        pts.forEach(function (i, k) { var p = proj(i % NX, (i / NX) | 0, T.z[i] + 2); if (k) g.lineTo(p[0], p[1]); else g.moveTo(p[0], p[1]); }); g.stroke();
+        var gap = 9, off = Math.floor(t * 6) % gap;
+        for (var k = off; k + 2 < pts.length; k += gap) {
+          var i0 = pts[k], i1 = pts[k + 2], p0 = proj(i0 % NX, (i0 / NX) | 0, T.z[i0] + 2), p1 = proj(i1 % NX, (i1 / NX) | 0, T.z[i1] + 2), ang = Math.atan2(p1[1] - p0[1], p1[0] - p0[0]);
+          g.save(); g.translate(p1[0], p1[1]); g.rotate(ang); g.fillStyle = 'rgba(255,240,200,' + a + ')'; g.beginPath(); g.moveTo(6, 0); g.lineTo(-4, -4.5); g.lineTo(-1.5, 0); g.lineTo(-4, 4.5); g.closePath(); g.fill(); g.restore();
+        }
+      });
+      // moving scent from the picked stand
+      if (M && M.stands[sel]) {
+        parts.forEach(function (p) {
+          var i = clamp(Math.round(p.y), 0, NY - 1) * NX + clamp(Math.round(p.x), 0, NX - 1), v = flowAt(T.F, M.A, i), sp = Math.sqrt(v[0] * v[0] + v[1] * v[1]) || 1;
+          var jit = M.A.calm ? 1.2 : M.A.mode === 'mixed' ? 0.6 : 0.25;
+          p.x += v[0] / sp * 0.45 + (Math.random() - 0.5) * jit; p.y += v[1] / sp * 0.45 + (Math.random() - 0.5) * jit; p.age++;
+          if (p.age > 140 || p.x < 0 || p.y < 0 || p.x >= NX || p.y >= NY) { p.x = M.stands[sel].x; p.y = M.stands[sel].y; p.age = 0; }
+          var q = proj(p.x, p.y, zAt(p.x, p.y) + 3); g.fillStyle = 'rgba(255,190,120,' + (0.8 * (1 - p.age / 140)) + ')'; g.beginPath(); g.arc(q[0], q[1], 2.1, 0, 7); g.fill();
+        });
+      }
+      // walk-in
+      if (W && W.path) {
+        g.setLineDash([5, 5]); g.lineDashOffset = -t * 12; g.strokeStyle = W.exposed ? '#ffd166' : '#ffffff'; g.lineWidth = 2.5; g.beginPath();
+        W.path.forEach(function (i, k) { var p = proj(i % NX, (i / NX) | 0, T.z[i] + 3); if (k) g.lineTo(p[0], p[1]); else g.moveTo(p[0], p[1]); }); g.stroke(); g.setLineDash([]);
+      }
+      // parking + stands
+      T.parking.forEach(function (p) { var q = proj(p.x * K + 2, p.y * K + 2, zAt(p.x * K + 2, p.y * K + 2) + 4); g.fillStyle = '#1d3557'; g.fillRect(q[0] - 8, q[1] - 8, 16, 16); g.fillStyle = '#fff'; g.font = 'bold 11px system-ui,sans-serif'; g.textAlign = 'center'; g.fillText('P', q[0], q[1] + 4); });
+      if (M) M.stands.forEach(function (s, k) {
+        var q = proj(s.x, s.y, zAt(s.x, s.y) + 6), c = { green: '#2ea043', yellow: '#e3b341', red: '#d1242f' }[s.color];
+        g.strokeStyle = '#111'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(q[0], q[1]); g.lineTo(q[0], q[1] - 16); g.stroke();
+        g.fillStyle = c; g.beginPath(); g.arc(q[0], q[1] - 20, k === sel ? 8 : 6, 0, 7); g.fill(); g.lineWidth = k === sel ? 3 : 1.5; g.strokeStyle = '#fff'; g.stroke();
+        g.font = (k === sel ? 'bold ' : '') + '12px system-ui,sans-serif'; g.textAlign = 'center'; g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,.65)'; g.strokeText(s.name, q[0], q[1] - 32); g.fillStyle = '#fff'; g.fillText(s.name, q[0], q[1] - 32);
+        s.sx = q[0]; s.sy = q[1] - 20;
+      });
+      // wind arrow (top-left): which way the air goes
+      if (M && !M.A.calm) {
+        var c = Math.cos(view.yaw), sn = Math.sin(view.yaw), wx = c * M.A.tx - sn * M.A.ty, wy = (sn * M.A.tx + c * M.A.ty) * Math.sin(view.pitch), ang = Math.atan2(wy, wx);
+        g.save(); g.translate(34, 34); g.fillStyle = 'rgba(0,0,0,.45)'; g.beginPath(); g.arc(0, 0, 24, 0, 7); g.fill(); g.rotate(ang); g.fillStyle = '#e8f1ff'; g.beginPath(); g.moveTo(15, 0); g.lineTo(-6, -8); g.lineTo(-2, 0); g.lineTo(-6, 8); g.closePath(); g.fill(); g.restore();
+        g.fillStyle = '#fff'; g.font = '10px system-ui,sans-serif'; g.textAlign = 'center'; g.fillText('wind', 34, 70);
+      }
+      // north marker
+      var nN = proj(NX / 2, -6, T.F.max), nC = proj(NX / 2, 0, T.F.max); g.fillStyle = '#fff'; g.font = 'bold 12px system-ui,sans-serif'; g.textAlign = 'center'; g.fillText('N', nN[0], nN[1]);
+      raf = requestAnimationFrame(frame);
+    }
+    // gestures
+    var drag = null;
+    cv.addEventListener('pointerdown', function (e) { drag = { x: e.clientX, y: e.clientY, yaw: view.yaw, pitch: view.pitch, moved: false }; cv.setPointerCapture && cv.setPointerCapture(e.pointerId); });
+    cv.addEventListener('pointermove', function (e) { if (!drag) return; var dx = e.clientX - drag.x, dy = e.clientY - drag.y; if (Math.abs(dx) + Math.abs(dy) > 6) drag.moved = true; view.yaw = drag.yaw + dx * 0.01; view.pitch = clamp(drag.pitch - dy * 0.006, 0.45, Math.PI / 2); });
+    cv.addEventListener('pointerup', function (e) {
+      if (drag && !drag.moved && M) { var r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top; M.stands.forEach(function (s, k) { if (Math.hypot(s.sx - x, s.sy - y) < 22) { sel = k; compute(); } }); }
+      drag = null;
+    });
+    el.addEventListener('input', function (e) { if (e.target === hr) { hour = Number(hr.value); compute(); } });
+    el.addEventListener('change', function (e) { if (e.target === dt && dt.value) { var p = dt.value.split('-'); day = new Date(+p[0], p[1] - 1, +p[2], 12); setup(); compute(); if (host.onDay) host.onDay(day); } });
+    el.addEventListener('click', function (e) {
+      var b = e.target.closest('[data-t3]'), st = e.target.closest('[data-t3st]');
+      if (st) { sel = Number(st.getAttribute('data-t3st')); compute(); return; }
+      if (!b) return; var a = b.getAttribute('data-t3');
+      if (a === 'turn') view.yaw += Math.PI / 4; else if (a === 'top') view.pitch = view.pitch > 1.5 ? 0.95 : Math.PI / 2;
+    });
+    function onResize() { S = size(); bufKey = ''; }
+    window.addEventListener('resize', onResize);
+    setup(); compute(); raf = requestAnimationFrame(frame);
+    return {
+      destroy: function () { dead = true; cancelAnimationFrame(raf); window.removeEventListener('resize', onResize); },
+      refresh: function () { setup(); compute(); },
+      state: function () { return M ? { phase: M.phase, mode: M.A.mode, cls: M.A.cls, calm: M.A.calm, stands: M.stands.map(function (s) { return { name: s.name, color: s.color, hitB: s.hitB, hitR: s.hitR, strong: s.strong }; }), routes: T.routes.length, walk: W ? { len: W.path.length, exposed: W.exposed } : W, why: Array.prototype.map.call(el.querySelectorAll('.t3-why li'), function (l) { return l.textContent; }) } : null; },
+      setHour: function (h) { hour = h; hr.value = h; compute(); }, setSel: function (k) { sel = k; compute(); },
+      renderMs: function () { var t0 = performance.now(); bufKey = ''; terrain(); return performance.now() - t0; }
+    };
+  }
+  window.BLTerrain = { mount: mount, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes };
+})();

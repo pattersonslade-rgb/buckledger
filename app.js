@@ -1,5 +1,5 @@
 /* Buck Ledger: a hunter's logbook that fills itself in from your SD card.
- * Everything is stored on the device (IndexedDB). No accounts, no server, works offline. */
+ * Everything is stored on the device (IndexedDB). No accounts, no server. */
 (function () {
   'use strict';
   var C = window.BUCKLEDGER_CONFIG || {};
@@ -98,13 +98,13 @@
   var P = [];         // photo records (with thumb Blobs)
   var PI = {};        // id -> photo
   function defaults() {
-    return { schema: SCHEMA, cameras: [], deer: [], pulls: [], map: null, settings: { lat: null, lng: null, shootMin: 30, gapMin: 20, license: null, deviceId: null, lastBackup: null, lastCam: null, installDismissed: false, createdAt: Date.now() } };
+    return { schema: SCHEMA, cameras: [], deer: [], pulls: [], map: null, bait: [], preds: [], t3: null, settings: { lat: null, lng: null, shootMin: 30, gapMin: 20, license: null, deviceId: null, lastBackup: null, lastCam: null, installDismissed: false, createdAt: Date.now(), states: [], areas: {}, hideSmall: true, smallMax: 5, statesAsked: false } };
   }
   function num(v, lo, hi, def) { v = Number(v); return (v !== null && v !== '' && isFinite(v) && v >= lo && v <= hi) ? v : def; }
   function migrate(s) {
     var d = defaults();
     if (!s || typeof s !== 'object') return d;
-    var out = { schema: SCHEMA, cameras: [], deer: [], pulls: [], map: null, settings: d.settings };
+    var out = { schema: SCHEMA, cameras: [], deer: [], pulls: [], map: null, bait: [], preds: [], t3: null, settings: d.settings };
     var st = (s.settings && typeof s.settings === 'object') ? s.settings : {};
     ['license', 'deviceId', 'lastBackup', 'lastCam', 'installDismissed', 'createdAt'].forEach(function (k) { if (st[k] !== undefined) out.settings[k] = st[k]; });
     out.settings.lat = (st.lat === null || st.lat === undefined || st.lat === '') ? null : num(st.lat, -90, 90, null);
@@ -113,16 +113,27 @@
     out.settings.shootMin = num(st.shootMin, 0, 90, 30);
     out.settings.gapMin = num(st.gapMin, 1, 240, 20);
     out.settings.lastCam = typeof out.settings.lastCam === 'string' ? out.settings.lastCam.slice(0, 40) : null;
+    var SD = (window.BL_STATES && window.BL_STATES.states) || {};
+    out.settings.states = (Array.isArray(st.states) ? st.states : []).filter(function (a, i, arr) { return typeof a === 'string' && SD.hasOwnProperty(a) && arr.indexOf(a) === i; }).slice(0, 10);
+    out.settings.areas = {};
+    if (st.areas && typeof st.areas === 'object') out.settings.states.forEach(function (a) { var r = SD[a].rut, v = st.areas[a]; if (r && r.areas && typeof v === 'string' && r.areas.some(function (x) { return x.name === v; })) out.settings.areas[a] = v; });
+    out.settings.hideSmall = st.hideSmall === undefined ? true : !!st.hideSmall;
+    out.settings.smallMax = num(st.smallMax, 0, 30, 5);
+    out.settings.statesAsked = !!st.statesAsked;
     var seen = {};
     (Array.isArray(s.cameras) ? s.cameras : []).forEach(function (c) {
       if (!c || typeof c !== 'object') return;
       var id = clampStr(c.id || uid(), 40); if (seen[id]) return; seen[id] = 1;
-      out.cameras.push({ id: id, name: clampStr(c.name || 'Camera', 60), offsetMin: Math.round(num(c.offsetMin, -5256000, 5256000, 0)), created: num(c.created, 0, 1e14, Date.now()) });
+      var zones = (Array.isArray(c.zones) ? c.zones : []).filter(function (z) { return z && typeof z === 'object'; }).slice(0, 8).map(function (z, i) { return { name: clampStr(z.name || ('View ' + (i + 1)), 30), facing: num(z.facing, 0, 359, 0) }; });
+      out.cameras.push({ id: id, name: clampStr(c.name || 'Camera', 60), offsetMin: Math.round(num(c.offsetMin, -5256000, 5256000, 0)), created: num(c.created, 0, 1e14, Date.now()),
+        facing: (c.facing === null || c.facing === undefined || c.facing === '') ? null : num(c.facing, 0, 359, null), rotating: !!c.rotating && zones.length > 0, zones: zones });
     });
     (Array.isArray(s.deer) ? s.deer : []).forEach(function (b) {
       if (!b || typeof b !== 'object') return;
       var id = clampStr(b.id || uid(), 40); if (seen[id]) return; seen[id] = 1;
-      out.deer.push({ id: id, name: clampStr(b.name || 'Buck', 60), notes: clampStr(b.notes, 2000), created: num(b.created, 0, 1e14, Date.now()) });
+      out.deer.push({ id: id, name: clampStr(b.name || 'Buck', 60), notes: clampStr(b.notes, 2000), created: num(b.created, 0, 1e14, Date.now()),
+        points: (b.points === null || b.points === undefined || b.points === '') ? null : num(b.points, 0, 40, null), photo: typeof b.photo === 'string' ? b.photo.slice(0, 40) : null,
+        renames: (Array.isArray(b.renames) ? b.renames : []).filter(function (r) { return r && typeof r === 'object'; }).slice(-50).map(function (r) { return { from: clampStr(r.from, 60), at: num(r.at, 0, 1e14, 0) }; }) });
     });
     (Array.isArray(s.pulls) ? s.pulls : []).forEach(function (u) {
       if (!u || typeof u !== 'object') return;
@@ -137,6 +148,24 @@
       if (L.tier === 'elite' && L.source === 'gumroad' && !L.upgrade && !L.product) L.tier = 'pro';
     }
     out.map = (window.BuckSim && s.map) ? window.BuckSim.clean(s.map) : null;
+    var camOk = {}; out.cameras.forEach(function (c) { camOk[c.id] = 1; });
+    var deerOk = {}; out.deer.forEach(function (b) { deerOk[b.id] = 1; });
+    (Array.isArray(s.bait) ? s.bait : []).slice(0, 2000).forEach(function (b) {
+      if (!b || typeof b !== 'object' || !camOk[b.cam] || !/^\d{4}-\d\d-\d\d$/.test(String(b.day))) return;
+      out.bait.push({ id: clampStr(b.id || uid(), 40), cam: b.cam, day: String(b.day), what: clampStr(b.what, 60) });
+    });
+    (Array.isArray(s.preds) ? s.preds : []).slice(0, 2000).forEach(function (p) {
+      if (!p || typeof p !== 'object') return;
+      var who = typeof p.who === 'string' && p.who ? p.who.slice(0, 40) : null;   // kept even if the buck/camera was removed later (shown as not scorable)
+      if (!who || typeof p.cam !== 'string' || !/^\d{4}-\d\d-\d\d$/.test(String(p.from)) || !/^\d{4}-\d\d-\d\d$/.test(String(p.to))) return;
+      out.preds.push({ id: clampStr(p.id || uid(), 40), who: who, whoName: clampStr(p.whoName, 60), cam: p.cam.slice(0, 40), camName: clampStr(p.camName, 60), from: String(p.from), to: String(p.to),
+        m0: Math.round(num(p.m0, 0, 1439, 0)), m1: Math.round(num(p.m1, 0, 1439, 0)), made: num(p.made, 0, 1e14, 0), basis: (Array.isArray(p.basis) ? p.basis : []).slice(0, 12).map(function (x) { return clampStr(x, 300); }),
+        photosBefore: Math.round(num(p.photosBefore, 0, 1e8, 0)), lastAdded: num(p.lastAdded, 0, 1e14, 0), hash: /^[0-9a-f]{64}$/.test(String(p.hash)) ? p.hash : '' });
+    });
+    if (s.t3 && typeof s.t3 === 'object' && s.t3.box && typeof s.t3.box === 'object') {
+      var bx = s.t3.box, la = num(bx.lat, 18, 72, null), lo = num(bx.lng, -180, -60, null);
+      if (la !== null && lo !== null) out.t3 = { box: { lat: la, lng: lo, acres: num(bx.acres, 5, 5000, 160) }, parking: (Array.isArray(s.t3.parking) ? s.t3.parking : []).filter(function (p) { return p && Number.isInteger(p.x) && Number.isInteger(p.y) && p.x >= 0 && p.y >= 0 && p.x < 20 && p.y < 26; }).slice(0, 6).map(function (p) { return { x: p.x, y: p.y }; }) };
+    }
     return out;
   }
   function cleanPhoto(p, camIds, deerIds) {
@@ -148,7 +177,9 @@
       t: parseLocal(p.t) ? clampStr(p.t, 19) : null, tsrc: ['exif', 'stamp', 'file'].indexOf(p.tsrc) >= 0 ? p.tsrc : null,
       fileT: parseLocal(p.fileT) ? clampStr(p.fileT, 19) : null,
       tags: tags, deer: dr, done: !!p.done && (tags.length + dr.length > 0),
-      thumb: p.thumb instanceof Blob ? p.thumb : null, added: num(p.added, 0, 1e14, Date.now())
+      thumb: p.thumb instanceof Blob ? p.thumb : null, added: num(p.added, 0, 1e14, Date.now()),
+      temp: (p.temp === null || p.temp === undefined || p.temp === '') ? null : num(p.temp, -40, 130, null), tempSrc: p.tempSrc === 'ocr' ? 'ocr' : (p.temp !== null && p.temp !== undefined && p.temp !== '' ? 'typed' : null),
+      dir: ['L', 'R', 'T', 'A'].indexOf(p.dir) >= 0 ? p.dir : null, zone: typeof p.zone === 'string' ? p.zone.slice(0, 30) : null
     };
   }
   var saveTimer = null;
@@ -339,7 +370,7 @@
     return null;
   }
   function judge(j, prod) {
-    if (!j || j._network) return { state: 'network', msg: 'Couldn’t reach Gumroad. Connect to the internet once to activate your key; after that it works offline.' };
+    if (!j || j._network) return { state: 'network', msg: 'Couldn’t reach Gumroad. Connect to the internet once to activate your key; after that it stays unlocked on this phone.' };
     if (!j.success) {
       if (j._http >= 500) return { state: 'network', msg: 'Gumroad is having trouble right now. Please try again in a few minutes.' };
       var m = String(j.message || '');
@@ -381,7 +412,7 @@
     return devUnlock(n).then(function (isDev) {
       if (isDev) { S.settings.license = { ok: true, tier: 'elite', key: key.toUpperCase(), at: Date.now(), source: 'dev', verifiedAt: Date.now() }; flush(); return { ok: true, msg: 'Dev unlock: Elite (DEV_MODE is on).' }; }
       if (!proOnSale()) return { ok: false, msg: 'Pro and Elite aren’t on sale yet, so keys can’t be checked. Please check back soon.' };
-      if (navigator.onLine === false) return { ok: false, msg: 'You’re offline. Connect to the internet once to activate your key; after that it works offline.' };
+      if (navigator.onLine === false) return { ok: false, msg: 'You’re offline. Connect to the internet once to activate your key; after that it stays unlocked on this phone.' };
       var cur = S.settings.license;
       var sameMain = cur && cur.ok && cur.source === 'gumroad' && normCode(cur.key) === n;
       var sameUp = cur && cur.ok && cur.upgrade && normCode(cur.upgrade.key) === n;
@@ -616,6 +647,7 @@
     if (!S) return;
     R = parseHash();
     if (simApi) { simApi.destroy(); simApi = null; }
+    if (t3Api) { t3Api.destroy(); t3Api = null; }
     var v = VIEWS[R.view] || VIEWS.ledger, html;
     try { html = v(); } catch (e) { if (window.console) console.error(e); html = '<div class="panel">Something went wrong showing this screen. <a href="#/">Back to the Ledger</a></div>'; }
     $('#app').innerHTML = v.full ? html : '<main class="wrap">' + html + '</main>';
@@ -638,7 +670,7 @@
     if (hidden) { nav.innerHTML = ''; return; }
     var u = unsortedCount();
     var items = [['ledger', '#/', 'Ledger'], ['sort', '#/sort', 'Sort Pass'], ['bucks', '#/bucks', 'Bucks'], ['cams', '#/cams', 'Cameras'], ['sim', '#/sim', 'Simulator'], ['more', '#/more', 'More']];
-    var on = { buck: 'bucks', photo: 'ledger', pull: 'ledger', stamp: 'ledger', clock: 'cams', cam: 'cams' }[R.view] || R.view;
+    var on = { buck: 'bucks', photo: 'ledger', pull: 'ledger', stamp: 'ledger', clock: 'cams', cam: 'cams', predict: 'bucks', states: 'more', research: 'more' }[R.view] || R.view;
     nav.innerHTML = items.map(function (it) {
       return '<a href="' + it[1] + '" class="' + (on === it[0] ? 'on' : '') + '" data-nav="' + it[0] + '">' + ICONS[it[0]] + it[2] + (it[0] === 'sort' && u ? '<span class="badge">' + (u > 999 ? '999+' : u) + '</span>' : '') + '</a>';
     }).join('');
@@ -665,7 +697,8 @@
     h += '<div class="actions"><a class="act main" href="#/pull"><b>Log a Pull</b><span>add photos</span></a>' +
       '<a class="act ' + (u ? 'hot' : '') + '" href="#/sort" id="act-sort"><b>Sort Pass</b><span>' + (u ? u + ' waiting' : 'all sorted ✓') + '</span></a>' +
       '<a class="act ' + (nt ? 'hot' : '') + '" href="#/stamp" id="act-stamp"><b>Stamp Reader</b><span>' + (nt ? nt + ' need a time' : 'all timed ✓') + '</span></a></div>';
-    var whoOpts = SUBJECTS.concat(S.deer.map(function (b) { return ['deer:' + b.id, '★ ' + b.name]; }));
+    if (!S.settings.states.length && !S.settings.statesAsked) h += '<div class="panel small" id="state-prompt">📍 <b>Where do you hunt?</b> Pick your state for rut timing and acorn info. <a class="btn sm go" href="#/states">Pick state</a> <button class="btn sm plain" data-act="states-later">Later</button></div>';
+    var whoOpts = SUBJECTS.concat(visibleDeer().map(function (b) { return ['deer:' + b.id, '★ ' + b.name]; }));
     if (!whoOpts.some(function (o) { return o[0] === ledgerF.who; })) ledgerF.who = 'all';
     if (ledgerF.cam && !cam(ledgerF.cam)) ledgerF.cam = '';
     h += '<div class="filters"><select id="f-who" aria-label="Who">' + whoOpts.map(function (o) { return '<option value="' + esc(o[0]) + '"' + (o[0] === ledgerF.who ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select>' +
@@ -709,7 +742,7 @@
     if (!v) return;
     var note = sunNote(v.d);
     sheet('<h2 style="font-family:Georgia,serif">' + esc(whoOf(v)) + '</h2><p class="muted" style="margin-bottom:6px">' + esc(fmtDate(v.d)) + ' · ' + esc(fmtTime(v.d)) + (v.photos.length > 1 ? '–' + esc(fmtTime(v.end)) : '') + ' · ' + esc(camName(v.cam)) + '</p>' +
-      '<p class="small">' + lightMark(v.light) + ' ' + (v.light ? LIGHT_LABEL[v.light] : 'Light unknown (no property location)') + (note ? ' · ' + esc(note) : '') + '</p>' +
+      '<p class="small">' + lightMark(v.light) + ' ' + (v.light ? LIGHT_LABEL[v.light] : 'Light unknown (no property location)') + (note ? ' · ' + esc(note) : '') + '</p>' + visitDetails(v, sub) +
       '<div class="pgrid">' + v.photos.map(function (p) { var d = eff(p); return '<a href="#/photo/' + encodeURIComponent(p.id) + '" data-x="close">' + (p.thumb ? '<img alt="" src="' + thumbURL(p) + '">' : '') + '<span class="cap">' + esc(d ? fmtTime(d) : '') + '</span></a>'; }).join('') + '</div>' +
       '<div class="btn-row" style="margin-top:12px"><button class="btn ink" data-x="close">Close</button></div>', function (x) { if (x === 'close') { closeSheet(); return false; } });
   }
@@ -717,7 +750,7 @@
   window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); deferredInstall = e; });
   function installNote() {
     if (isStandalone() || S.settings.installDismissed) return '';
-    return '<div class="panel small" id="install-note" style="margin-top:12px"><b>Put it on your home screen</b> so it opens like an app and works with no signal. ' +
+    return '<div class="panel small" id="install-note" style="margin-top:12px"><b>Put it on your home screen</b> so it opens like an app. ' +
       (isIOS() ? 'In Safari tap <b>Share</b> → <b>Add to Home Screen</b>.' : (deferredInstall ? '<button class="btn sm" data-act="install">Install</button>' : 'Browser menu (⋮) → <b>Add to Home screen</b>.')) +
       ' <button class="btn sm plain" data-act="install-dismiss">Got it</button></div>';
   }
@@ -770,12 +803,12 @@
   }
   function addCamera(name) {
     if (!canAddCam()) { proSheet('cam'); return null; }
-    var c = { id: uid(), name: clampStr(String(name).trim() || 'Camera', 60), offsetMin: 0, created: Date.now() };
+    var c = { id: uid(), name: clampStr(String(name).trim() || 'Camera', 60), offsetMin: 0, created: Date.now(), facing: null, rotating: false, zones: [] };
     S.cameras.push(c); save(); return c.id;
   }
   function addBuck(name) {
     if (!canAddBuck()) { proSheet('buck'); return null; }
-    var b = { id: uid(), name: clampStr(String(name).trim() || 'Buck', 60), notes: '', created: Date.now() };
+    var b = { id: uid(), name: clampStr(String(name).trim() || 'Buck', 60), notes: '', created: Date.now(), points: null, photo: null, renames: [] };
     S.deer.push(b); save(); return b.id;
   }
   function readHead(file, n) {
@@ -873,7 +906,7 @@
       '<div class="sp-photo">' + (p.thumb ? '<img id="sp-img" alt="Trail camera photo" src="' + thumbURL(p) + '">' : '<span class="muted">No picture (this browser couldn’t open the file)</span>') + '</div>' +
       '<div class="sp-meta"><span class="mono">' + esc(d ? fmtDate(d) + ' ' + fmtTime(d) : 'No time yet') + '</span>' + (d && lightOf(d) ? ' ' + lightMark(lightOf(d)) + ' ' + LIGHT_LABEL[lightOf(d)] : '') +
       (!p.t ? ' · <a href="#/stamp/' + encodeURIComponent(p.id) + '">Read the stamp</a>' : '') + '<span class="grow"></span><span class="tiny">' + esc(p.name) + '</span></div>' +
-      '<div class="tray"><div class="bucks">' + S.deer.map(function (b) { return '<button class="tok named' + (sortSel.deer.indexOf(b.id) >= 0 ? ' on' : '') + '" data-deer="' + esc(b.id) + '">★ ' + esc(b.name) + '</button>'; }).join('') +
+      '<div class="tray">' + (sortSel.deer.length ? '' : suggestChip(p, 'sort-suggest')) + '<div class="bucks">' + S.deer.map(function (b) { return '<button class="tok named' + (sortSel.deer.indexOf(b.id) >= 0 ? ' on' : '') + '" data-deer="' + esc(b.id) + '">★ ' + esc(b.name) + '</button>'; }).join('') +
       '<button class="tok add" data-act="sort-newbuck">＋ Name a buck</button></div>' +
       '<div class="kinds">' + KINDS.slice(0, 4).map(function (k) { return '<button class="tok' + (sortSel.tags.indexOf(k.id) >= 0 ? ' on' : '') + '" data-kind="' + k.id + '">' + k.label + '</button>'; }).join('') + '</div>' +
       '<div class="commit"><button class="tok empty" data-act="sort-empty">Empty ⏭</button><button class="tok" data-act="sort-same"' + (sortLast ? '' : ' disabled') + '>Same as last</button><button class="tok on" data-act="sort-file" id="sort-file">File it ✓</button></div></div></div>';
@@ -927,6 +960,7 @@
         '<div class="btn-row" style="margin:8px 0"><button class="btn sm" data-act="stamp-band">' + (stampBand === 'bottom' ? 'Stamp is at the top' : 'Stamp is at the bottom') + '</button><button class="btn sm" data-act="stamp-pan">Slide ⇆</button></div>' +
         '<img class="stamp-full" alt="Full photo" src="' + url + '">' : '<div class="panel">No picture for this file.</div>') +
       '<div class="paper"><div class="dt2"><label class="field"><span>Date on the photo</span><input type="date" id="stamp-date" value="' + esc(stampLastDate) + '"></label><label class="field"><span>Time on the photo</span><input type="time" id="stamp-time" step="1"></label></div>' +
+      '<label class="field"><span>Temp on the photo (°F, optional)</span><input type="number" id="stamp-temp" inputmode="numeric" min="-40" max="130" placeholder="e.g. 41"></label>' +
       '<button class="btn go block" data-act="stamp-save" data-id="' + esc(p.id) + '">Save time &amp; next</button>' +
       '<div class="btn-row" style="margin-top:8px">' + (fd ? '<button class="btn ink sm" data-act="stamp-filedate" data-id="' + esc(p.id) + '">Use file date (' + esc(fmtDate(fd) + ' ' + fmtTime(fd)) + ')</button>' : '') + '<button class="btn ink sm" data-act="stamp-skip" data-id="' + esc(p.id) + '">Skip</button></div>' +
       '<p class="tiny muted" style="margin:8px 0 0">The file date is often when the card was copied, not when the photo was taken. Only use it if you know it’s right.</p></div>';
@@ -945,6 +979,7 @@
       if (!parseLocal(v)) { toast('That date/time doesn’t look right'); return; }
       stampLastDate = dv; p.tsrc = 'stamp';
     }
+    var tv2 = ($('#stamp-temp') || {}).value; if (tv2 !== undefined && tv2 !== '') { var tn = Number(tv2); if (isFinite(tn) && tn >= -40 && tn <= 130) { p.temp = Math.round(tn); p.tempSrc = 'typed'; } }
     p.t = v; photoPut(p); toast('Time saved'); go('#/stamp');
   }
 
@@ -1006,8 +1041,10 @@
     h += '<div class="paper"><p style="margin:0 0 4px"><b class="mono">' + esc(d ? fmtDate(d) + ' ' + fmtTime(d) : 'No time yet') + '</b> · ' + esc(camName(p.cam)) + '</p>' +
       '<p class="small muted" style="margin:0 0 6px">' + (src ? 'Time ' + src : '') + (c && c.offsetMin && rec ? ' · camera said ' + esc(fmtTime(rec)) + ', clock fix applied' : '') + '</p>' +
       (l ? '<p class="small" style="margin:0 0 6px">' + lightMark(l) + ' ' + LIGHT_LABEL[l] + (note ? ' · ' + esc(note) : '') + '</p>' : '') +
+      (d ? visitDetailsPhoto(p) : '') + suggestChip(p, 'ph-suggest') +
       '<hr><h3>Who’s in it</h3><div style="display:flex;flex-wrap:wrap;gap:6px">' + S.deer.map(function (b) { return '<button class="tok named' + (p.deer.indexOf(b.id) >= 0 ? ' on' : '') + '" data-ptoggle="deer:' + esc(b.id) + '">★ ' + esc(b.name) + '</button>'; }).join('') +
       KINDS.map(function (k) { return '<button class="tok' + (p.tags.indexOf(k.id) >= 0 ? ' on' : '') + '" data-ptoggle="' + k.id + '">' + k.label + '</button>'; }).join('') + '</div>' +
+      photoExtras(p) +
       '<hr><h3>Fix the time</h3><div class="dt2"><label class="field"><span>Date on the photo</span><input type="date" id="ph-date" value="' + esc(p.t ? p.t.slice(0, 10) : '') + '"></label><label class="field"><span>Time on the photo</span><input type="time" id="ph-time" step="1" value="' + esc(p.t ? p.t.slice(11, 19) : '') + '"></label></div>' +
       '<button class="btn ink block" data-act="ph-time" data-id="' + esc(p.id) + '">Save time</button>' +
       '<p class="tiny muted" style="margin:6px 0 0">Type what the camera recorded. A Clock Check fix for the camera is added on top.</p>' +
@@ -1020,11 +1057,14 @@
     var h = head('Your bucks');
     h += '<div class="paper">';
     if (!S.deer.length) h += '<p class="muted" style="margin:0 0 10px">Name the bucks you recognize. Tag them in the Sort Pass and each one gets his own page: Day Ring, Season Strip and a plain-English read.</p>';
-    h += '<ul class="list">' + S.deer.map(function (b) {
-      var vs = visits('deer:' + b.id), last = vs[0], cover = last ? last.photos[0] : null, t = tally(vs);
+    var shown = visibleDeer(), hidden = S.deer.length - shown.length;
+    h += '<ul class="list">' + shown.map(function (b) {
+      var vs = visits('deer:' + b.id), last = vs[0], cover = (b.photo && PI[b.photo]) || (last ? last.photos[0] : null), t = tally(vs);
       return '<li><a class="item" href="#/buck/' + encodeURIComponent(b.id) + '">' + (cover && cover.thumb ? '<img class="thumb" alt="" src="' + thumbURL(cover) + '">' : '<span class="thumb">★</span>') +
-        '<span class="t"><b>' + esc(b.name) + '</b><span>' + plural(vs.length, 'visit') + (last ? ' · last ' + esc(fmtDate(last.d)) + (hasLoc() ? ' · ' + (t.light.day + t.light.light) + ' in daylight' : '') : '') + '</span></span><span>›</span></a></li>';
-    }).join('') + '</ul>';
+        '<span class="t"><b>' + esc(b.name) + (b.points !== null ? ' <span class="pts">' + b.points + ' pts</span>' : '') + '</b><span>' + plural(vs.length, 'visit') + (last ? ' · last ' + esc(fmtDate(last.d)) + (hasLoc() ? ' · ' + (t.light.day + t.light.light) + ' in daylight' : '') : '') + '</span></span><span>›</span></a></li>';
+    }).join('') + '</ul>' +
+      '<p class="small" style="margin:8px 0 0" id="small-filter">' + (S.settings.hideSmall ? (hidden ? plural(hidden, 'small buck') + ' hidden (' + S.settings.smallMax + ' points or less). ' : 'Small bucks (' + S.settings.smallMax + ' points or less) are hidden. ') + '<button class="btn sm plain" data-act="small-show">Show all</button>' : 'Showing all bucks. <button class="btn sm plain" data-act="small-hide">Hide small bucks</button>') + '</p>';
+    h += '<a class="btn ink block" style="margin-top:10px" href="#/predict">Predictions</a>';
     h += (canAddBuck() ? '<div style="display:flex;gap:8px;margin-top:10px"><input type="text" id="new-buck" maxlength="60" placeholder="New buck name, e.g. Big 8"><button class="btn go" data-act="add-buck">Add</button></div>' : '<p class="small muted" style="margin:10px 0 0">' + freeLine('buck') + '</p>') + '</div>';
     var allB = visits('bucks'), unnamed = allB.filter(function (v) { return v.photos.every(function (p) { return !p.deer.length; }); });
     if (unnamed.length) h += '<div class="panel small">' + plural(unnamed.length, 'buck visit') + ' tagged just “Buck”. Open them from the <a href="#/">Ledger</a> to name him later.</div>';
@@ -1046,10 +1086,12 @@
       }).join('') + '</div>';
       h += '<div class="ledger">' + vs.slice(0, 40).map(function (v) {
         var cover = v.photos[0];
-        return '<button class="lrow" data-visit="' + esc(cover.id) + '" data-sub="deer:' + esc(b.id) + '"><span class="tm">' + esc(fmtTime(v.d).replace(' ', '')) + '</span>' + lightMark(v.light) + '<span class="who"><b>' + esc(fmtDate(v.d)) + '</b><span>' + esc(camName(v.cam)) + '</span></span><span class="n">' + (v.photos.length > 1 ? '×' + v.photos.length : '') + '</span>' + (cover.thumb ? '<img alt="" loading="lazy" src="' + thumbURL(cover) + '">' : '') + '</button>';
+        return '<button class="lrow" data-visit="' + esc(cover.id) + '" data-sub="deer:' + esc(b.id) + '"><span class="tm">' + esc(fmtTime(v.d).replace(' ', '')) + '</span>' + lightMark(v.light) + '<span class="who"><b>' + esc(fmtDate(v.d)) + '</b><span>' + esc(camName(v.cam)) + (function () { var cp = companionsOf(v, 'deer:' + b.id); return cp.length ? ' · with ' + esc(cp.join(', ')) : ''; })() + '</span></span><span class="n">' + (v.photos.length > 1 ? '×' + v.photos.length : '') + '</span>' + (cover.thumb ? '<img alt="" loading="lazy" src="' + thumbURL(cover) + '">' : '') + '</button>';
       }).join('') + '</div>';
     }
-    h += '<div class="paper" style="margin-top:12px"><label class="field"><span>Name</span><input type="text" id="buck-name" maxlength="60" value="' + esc(b.name) + '"></label><label class="field"><span>Notes</span><textarea id="buck-notes" maxlength="2000" placeholder="Rack, marks, where he beds…">' + esc(b.notes) + '</textarea></label>' +
+    h += buckExtras(b, vs);
+    h += '<div class="paper" style="margin-top:12px"><label class="field"><span>Name</span><input type="text" id="buck-name" maxlength="60" value="' + esc(b.name) + '"></label>' +
+      '<label class="field"><span>Points (antler points, for the small-buck filter)</span><input type="number" id="buck-points" min="0" max="40" inputmode="numeric" value="' + (b.points === null ? '' : b.points) + '" placeholder="e.g. 8"></label><label class="field"><span>Notes</span><textarea id="buck-notes" maxlength="2000" placeholder="Rack, marks, where he beds…">' + esc(b.notes) + '</textarea></label>' +
       '<button class="btn ink block" data-act="buck-save" data-id="' + esc(b.id) + '">Save</button><button class="btn danger block" style="margin-top:8px" data-act="buck-del" data-id="' + esc(b.id) + '">Remove this buck</button></div>';
     return h;
   };
@@ -1077,6 +1119,7 @@
       '<p class="small muted" style="margin:0">Clock: ' + (c.offsetMin ? 'fixed, it was ' + fmtOffset(c.offsetMin) + (c.offsetMin > 0 ? ' behind' : ' ahead') : 'no fix applied') + '</p>' +
       '<a class="btn ink block" style="margin-top:10px" href="#/clock/' + encodeURIComponent(c.id) + '">Clock Check</a></div>';
     if (vs.length) h += '<div class="paper"><h3>Deer visits by time of day</h3><div class="ring-wrap">' + dayRing(vs) + '</div>' + legend() + '</div>';
+    h += camExtras(c);
     h += '<div class="paper"><label class="field"><span>Camera name</span><input type="text" id="cam-name" maxlength="60" value="' + esc(c.name) + '"></label><button class="btn ink block" data-act="cam-save" data-id="' + esc(c.id) + '">Save name</button>' +
       '<button class="btn danger block" style="margin-top:8px" data-act="cam-del" data-id="' + esc(c.id) + '">Delete camera and its photos</button></div>';
     return h;
@@ -1094,9 +1137,9 @@
       h += '<p class="small" style="color:#9a2f1c">' + esc(L.reason || 'Your license is no longer active.') + '</p>';
     }
     h += '<div class="tiers">' +
-      '<div class="tier' + (t === 'free' ? ' cur' : '') + '"><b>Free</b><span>' + plural(C.FREE_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.FREE_BUCK_LIMIT || 0, 'named buck') + '</span></div>' +
-      '<div class="tier' + (t === 'pro' ? ' cur' : '') + '"><b>Pro' + (priceOf('pro') ? ' · ' + esc(priceOf('pro')) : '') + '</b><span>' + plural(C.PRO_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.PRO_BUCK_LIMIT || 0, 'named buck') + '</span></div>' +
-      '<div class="tier' + (t === 'elite' ? ' cur' : '') + '"><b>Elite' + (priceOf('elite') ? ' · ' + esc(priceOf('elite')) : '') + '</b><span>Unlimited cameras &amp; bucks + Movement Simulator</span></div></div>' +
+      '<div class="tier' + (t === 'free' ? ' cur' : '') + '"><b>Free</b><span>' + plural(C.FREE_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.FREE_BUCK_LIMIT || 0, 'named buck') + ', ' + plural(C.FREE_PRED_LIMIT || 1, 'prediction') + '</span></div>' +
+      '<div class="tier' + (t === 'pro' ? ' cur' : '') + '"><b>Pro' + (priceOf('pro') ? ' · ' + esc(priceOf('pro')) : '') + '</b><span>' + plural(C.PRO_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.PRO_BUCK_LIMIT || 0, 'named buck') + ', ' + (C.PRO_OPEN_PRED_LIMIT || 5) + ' open predictions</span></div>' +
+      '<div class="tier' + (t === 'elite' ? ' cur' : '') + '"><b>Elite' + (priceOf('elite') ? ' · ' + esc(priceOf('elite')) : '') + '</b><span>Unlimited cameras, bucks &amp; predictions + 2D Movement Simulator + 3D Terrain Sim</span></div></div>' +
       '<p class="tiny muted" style="margin:6px 0 10px">' + esc(C.PRO_PRICE_NOTE || '') + '</p>';
     if (t === 'free') h += buyBtn('pro', 'Get Pro') + '<div style="height:8px"></div>' + buyBtn('elite', 'Get Elite');
     if (t === 'pro') h += buyBtn('upgrade', 'Upgrade to Elite') + '<p class="tiny muted" style="margin:6px 0 0">For Pro owners: pay just the difference. Enter the upgrade key below; it works together with your Pro key.</p>';
@@ -1108,7 +1151,9 @@
       h += '<label class="field" style="margin-top:12px"><span>Test code</span><input type="text" id="lic"></label><button class="btn ink block" data-act="unlock">Unlock</button><p class="small" id="lic-msg"></p>';
     }
     h += '</div>';
-    h += '<div class="paper" id="location"><h3>Property location</h3><p class="small muted" style="margin:0 0 8px">Used only on this phone to work out sunrise, sunset and shooting light for each visit. Nothing is sent anywhere.</p>' +
+    h += '<div class="paper" id="research-links"><h3>Your states &amp; research</h3><p class="small muted" style="margin:0 0 8px">' + (S.settings.states.length ? esc(S.settings.states.map(function (a) { return SD()[a].name; }).join(', ')) : 'No state picked yet.') + '</p><div class="btn-row"><a class="btn ink" href="#/states">Pick states</a><a class="btn ink" href="#/research">Research</a></div></div>';
+    h += '<div class="paper" id="weather"><h3>Weather for your visits</h3><p class="small muted" style="margin:0 0 8px">Hourly wind, gusts, temp, rain, pressure and cloud for each visit, from Open-Meteo. Only when you tap: it sends your property location and the dates, nothing else. Saved on this phone.</p><button class="btn ink block" data-act="wx-visits">Get weather for my visits</button></div>';
+    h += '<div class="paper" id="location"><h3>Property location</h3><p class="small muted" style="margin:0 0 8px">Used on this phone for sunrise, sunset, moon and shooting light. It is sent only when you tap “Get weather” (to Open-Meteo) or “Get USGS elevation” (box corners, to USGS).</p>' +
       '<div class="dt2" style="grid-template-columns:1fr 1fr"><label class="field"><span>Latitude</span><input type="text" inputmode="decimal" id="lat" value="' + (st.lat === null ? '' : st.lat) + '" placeholder="e.g. 30.12"></label><label class="field"><span>Longitude</span><input type="text" inputmode="decimal" id="lng" value="' + (st.lng === null ? '' : st.lng) + '" placeholder="e.g. -96.45"></label></div>' +
       '<div class="btn-row"><button class="btn ink" data-act="loc-here">Use my location</button><button class="btn ink" data-act="loc-save">Save</button></div>' +
       '<p class="tiny muted" style="margin:6px 0 0">Tip: stand on your property and tap “Use my location”. West longitudes are negative.</p></div>';
@@ -1125,25 +1170,28 @@
     h += '<div class="paper"><h3>Storage</h3><p class="small" style="margin:0 0 8px">' + plural(P.length, 'photo') + ' stored · ' + plural(empties, 'empty photo') + '</p>' +
       (empties ? '<button class="btn ink block" data-act="del-empties">Delete the ' + plural(empties, 'empty photo') + '</button>' : '') +
       '<button class="btn danger block" style="margin-top:8px" data-act="erase">Erase everything</button></div>';
-    h += '<div class="paper small"><h3>About</h3><p>' + esc(APP) + ' is a trail cam logbook built by a hunter. No account, no ads, no trackers, no subscription. Photos are shrunk and kept in this browser’s storage on this phone; they are never uploaded. Works offline after the first visit.</p><p style="margin:0"><a href="privacy.html">Privacy</a> · Version 2.0.0</p></div>';
+    h += '<div class="paper small"><h3>About</h3><p>' + esc(APP) + ' is a trail cam logbook built by a hunter. No account, no ads, no trackers, no subscription. Photos are shrunk and kept in this browser’s storage on this phone; they are never uploaded.</p><p style="margin:0"><a href="privacy.html">Privacy</a> · Version 3.0.0</p></div>';
     return h + installNote();
   };
 
   /* ---------------- Movement Simulator (Elite) ---------------- */
   var simApi = null;
   VIEWS.sim = function () {
-    var h = head('Movement Simulator');
+    var is3 = R.q.v === '3d';
+    var h = head(is3 ? '3D Terrain Sim' : 'Movement Simulator') + '<div class="seg" id="sim-tabs"><a href="#/sim" class="' + (is3 ? '' : 'on') + '">2D map</a><a href="#/sim?v=3d" class="' + (is3 ? 'on' : '') + '" id="tab-3d">3D terrain</a></div>';
+    if (is3) return h + sim3dHtml();
     if (!isElite()) {
       var t = tier();
       return h + '<div class="paper" id="sim-locked"><h3>🔒 An Elite feature</h3>' +
         '<p>Draw your property (bedding, food, water, creeks, funnels, roads, neighbor lines, stands) and watch where a buck is <i>likely</i> to move by hour. Slide time of day, season phase, wind, temperature and hunting pressure. A heat map and green/yellow/red stands update as you go, with a plain-language “why”.</p>' +
-        '<p class="small muted">Built from published whitetail GPS-collar research plus clearly labeled assumptions. It’s a thinking tool, not a forecast. Runs offline on your phone; your map is saved on the phone and in your backups.</p>' +
+        '<p class="small muted">Built from published whitetail GPS-collar research plus clearly labeled assumptions. It’s a thinking tool, not a forecast. Your map is saved on the phone and in your backups.</p>' +
         (t === 'pro' ? buyBtn('upgrade', 'Upgrade to Elite') : buyBtn('elite', 'Get Elite')) +
         (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more">I have a license key</a>' : '') + '</div>';
     }
     return h + '<div id="sim-root"></div>';
   };
   VIEWS.sim.after = function () {
+    if (R.q.v === '3d') { mount3d(); return; }
     var el = $('#sim-root'); if (!el || !window.BuckSim) return;
     simApi = window.BuckSim.mount(el, {
       getMap: function () { return S.map; },
@@ -1156,6 +1204,442 @@
       }
     });
   };
+
+  /* ================= v3: sun period, moon, weather, heading, bait, companions ================= */
+  var WX = {};      // hourly weather cache (kv 'wx'). Re-fetchable, so it is NOT put in backups.
+  var DEM = null;   // { key, z: Float32Array, at } USGS elevation for the 3D sim (kv 'dem'). Not in backups.
+  function wxSave() { if (DB) kvPut('wx', WX).catch(function () {}); }
+  function ymdOf(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+  function dayFrom(s) { var p = String(s).split('-'); return new Date(+p[0], p[1] - 1, +p[2], 12, 0, 0); }
+  var PERIOD_LABEL = { dawn: 'Dawn', day: 'Day', dusk: 'Dusk', night: 'Night' };
+  // Dawn / dusk = within 45 minutes either side of sunrise / sunset.
+  function periodOf(d) {
+    if (!d || !hasLoc()) return null;
+    var st = sunTimes(d, S.settings.lat, S.settings.lng); if (st.polar) return st.polar === 'day' ? 'day' : 'night';
+    var t = d.getTime(), r = st.rise.getTime(), s2 = st.set.getTime(), w = 45 * 60000;
+    if (Math.abs(t - r) <= w) return 'dawn'; if (Math.abs(t - s2) <= w) return 'dusk';
+    return t > r && t < s2 ? 'day' : 'night';
+  }
+  function sunMins(d) {
+    if (!d || !hasLoc()) return null; var st = sunTimes(d, S.settings.lat, S.settings.lng); if (st.polar) return null;
+    return { rise: Math.round((d - st.rise) / 60000), set: Math.round((d - st.set) / 60000) };
+  }
+  function moonEmoji(ph) { return ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'][Math.round(ph * 8) % 8]; }
+  function moonInfo(d) {
+    if (!window.BLAstro || !d) return null;
+    var m = BLAstro.moonAt(d, hasLoc() ? S.settings.lat : null, hasLoc() ? S.settings.lng : null), t = hasLoc() ? BLAstro.moonTimes(d, S.settings.lat, S.settings.lng) : null;
+    return { name: m.name, pct: Math.round(m.fraction * 100), up: m.up, rise: t && t.rise, set: t && t.set, emoji: moonEmoji(m.phase) };
+  }
+  function moonLine(d) {
+    var m = moonInfo(d); if (!m) return '';
+    return m.emoji + ' ' + m.name + ', ' + m.pct + '% lit' + (m.up === null ? '' : m.up ? ' · moon up' : ' · moon down') +
+      (m.rise || m.set ? ' · ' + (m.rise ? 'rose ' + fmtTime(m.rise) : '') + (m.rise && m.set ? ', ' : '') + (m.set ? 'set ' + fmtTime(m.set) : '') : '') + ' <span class="weak">weak evidence</span>';
+  }
+  function wxAt(d) { return (hasLoc() && window.BLWx && d) ? BLWx.hourAt(WX, S.settings.lat, S.settings.lng, d) : null; }
+  function wxLine(d) {
+    var h = wxAt(d); if (!h) return '';
+    var h3 = wxAt(new Date(d.getTime() - 3 * 36e5)), tr = (h.p !== null && h3 && h3.p !== null) ? (h.p - h3.p >= 1 ? ' rising' : h.p - h3.p <= -1 ? ' falling' : ' steady') : '';
+    var fr = BLWx.front(WX, S.settings.lat, S.settings.lng, d);
+    return 'Wind ' + BLWx.compass(h.wd) + ' ' + Math.round(h.ws || 0) + ' mph' + (h.wg ? ' (gusts ' + Math.round(h.wg) + ')' : '') + ' · ' + (h.t === null ? '' : Math.round(h.t) + '°F air') +
+      (h.p !== null ? ' · pressure ' + Math.round(h.p) + ' hPa' + tr : '') + (h.r ? ' · rain ' + h.r.toFixed(2) + ' in' : '') + (h.cc !== null ? ' · ' + Math.round(h.cc) + '% cloud' : '') +
+      (fr === 'cold' ? '<br><b>A cold front likely passed in the last day</b> (pressure dipped then rose, temp dropped, wind swung; estimated).' : fr === 'falling' ? '<br>Pressure fell a lot in the last day: a front may be coming (estimated).' : '');
+  }
+  var DIR_LABEL = { L: 'moving left', R: 'moving right', T: 'coming toward the camera', A: 'walking away' };
+  var C8 = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'], C8L = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
+  function c8(deg) { return Math.round((((deg % 360) + 360) % 360) / 45) % 8; }
+  function facingOf(c, zone) { if (!c) return null; if (c.rotating && zone) { for (var i = 0; i < c.zones.length; i++) if (c.zones[i].name === zone) return c.zones[i].facing; } return c.rotating ? null : c.facing; }
+  // Travel heading = where the camera looks + which way the deer crosses the frame.
+  function headingOf(p) { var f = facingOf(cam(p.cam), p.zone); if (f === null || f === undefined || !p.dir) return null; return (f + { A: 0, R: 90, T: 180, L: 270 }[p.dir]) % 360; }
+  function visitHeading(v) { for (var i = 0; i < v.photos.length; i++) { var h = headingOf(v.photos[i]); if (h !== null) return h; } return null; }
+  function baitBefore(camId, d) {
+    var day = ymdOf(d), best = null;
+    S.bait.forEach(function (b) { if (b.cam === camId && b.day <= day && (!best || b.day > best.day)) best = b; });
+    if (!best) return null;
+    return { ev: best, days: Math.round((dayFrom(day) - dayFrom(best.day)) / DAYMS) };
+  }
+  function companionsOf(v, sub, self) {
+    var all = visits('any', v.cam), host = null, id0 = v.photos[0].id;
+    all.some(function (x) { if (x.photos.some(function (p) { return p.id === id0; })) { host = x; return true; } return false; });
+    if (!host) return [];
+    var me = sub && sub.indexOf('deer:') === 0 ? sub.slice(5) : null, names = {}, kinds = {};
+    host.photos.forEach(function (p) { p.deer.forEach(function (d) { if (d !== me && !(self && self.deer.indexOf(d) >= 0) && deer(d)) names[deer(d).name] = 1; }); p.tags.forEach(function (t) { if (t !== 'empty' && t !== 'buck' && !(self && self.tags.indexOf(t) >= 0)) kinds[KIND_LABEL[t]] = 1; }); });
+    return Object.keys(names).concat(Object.keys(kinds));
+  }
+  function tempOfVisit(v) { for (var i = 0; i < v.photos.length; i++) if (v.photos[i].temp !== null && v.photos[i].temp !== undefined) return v.photos[i].temp; return null; }
+  function visitDetails(v, sub, self) {
+    var out = [], per = periodOf(v.d), sm = sunMins(v.d);
+    if (per) out.push('<b>' + PERIOD_LABEL[per] + '</b>' + (sm ? ' · ' + (Math.abs(sm.rise) <= Math.abs(sm.set) ? Math.abs(sm.rise) + ' min ' + (sm.rise < 0 ? 'before' : 'after') + ' sunrise' : Math.abs(sm.set) + ' min ' + (sm.set < 0 ? 'before' : 'after') + ' sunset') : ''));
+    var ml = moonLine(v.d); if (ml) out.push(ml);
+    var wl = wxLine(v.d); out.push(wl ? wl : (hasLoc() ? 'No weather saved for this day. <button class="btn sm ink" data-act="wx-visits">Get weather</button>' : 'Add your property location (More) for sun, moon and weather.'));
+    var tp = tempOfVisit(v); if (tp !== null) out.push('Camera ribbon temp: ' + tp + '°F');
+    var hd = visitHeading(v); if (hd !== null) out.push('Heading ' + C8L[c8(hd)]);
+    var bt = baitBefore(v.cam, v.d); if (bt) out.push(bt.days === 0 ? 'Bait put out that day' + (bt.ev.what ? ' (' + esc(bt.ev.what) + ')' : '') : plural(bt.days, 'day') + ' since bait' + (bt.ev.what ? ' (' + esc(bt.ev.what) + ')' : ''));
+    var cp = companionsOf(v, sub, self); if (cp.length) out.push('With: ' + esc(cp.join(', ')));
+    return '<ul class="vdet">' + out.map(function (l) { return '<li>' + l + '</li>'; }).join('') + '</ul>';
+  }
+  function fetchWeatherFor(days, lat, lng) {
+    if (!window.BLWx) return Promise.reject(new Error('no weather module'));
+    if (!navigator.onLine) { toast('No internet right now. Try again when you’re online.', 3500); return Promise.resolve(0); }
+    toast('Getting weather…', 2500);
+    return BLWx.fill(WX, lat, lng, days).then(function (n) { wxSave(); toast(n ? 'Weather saved for ' + plural(n, 'day') : 'Weather already saved'); return n; })
+      .catch(function () { toast('Couldn’t get the weather. Try again later.', 3500); return 0; });
+  }
+  function fetchWeatherForVisits() {
+    if (!hasLoc()) { toast('Add your property location first (More)'); return Promise.resolve(0); }
+    var days = {}; visits('any').forEach(function (v) { days[ymdOf(v.d)] = 1; var b = new Date(v.d.getTime() - DAYMS); days[ymdOf(b)] = 1; });
+    var list = Object.keys(days).filter(function (d) { return d <= ymdOf(new Date(Date.now() + 14 * DAYMS)); });
+    if (!list.length) { toast('No visits with a time yet'); return Promise.resolve(0); }
+    return fetchWeatherFor(list, S.settings.lat, S.settings.lng);
+  }
+
+  /* ================= v3: buck ID suggestions (on the phone, conservative) =================
+   * Suggests ONLY a buck you already named, and only when another photo from the SAME camera, within your
+   * visit gap, is tagged with exactly one named buck. It never makes up a name and you must OK it. */
+  function idSuggest(p) {
+    if (!p || p.deer.length || !p.cam || (p.tags.indexOf('empty') >= 0)) return null;
+    var d = eff(p); if (!d) return null;
+    var gap = S.settings.gapMin * 60000, names = {};
+    P.forEach(function (q) { if (q === p || q.cam !== p.cam || !q.deer.length) return; var e = eff(q); if (!e || Math.abs(e - d) > gap) return; q.deer.forEach(function (id) { if (deer(id)) names[id] = (names[id] || 0) + 1; }); });
+    var ids = Object.keys(names); if (ids.length !== 1) return null;
+    return { id: ids[0], n: names[ids[0]] };
+  }
+  function suggestChip(p, act) {
+    var sg = idSuggest(p); if (!sg) return '';
+    var b = deer(sg.id);
+    return '<div class="suggest" id="id-suggest"><span>Suggestion: <b>★ ' + esc(b.name) + '</b>? Same visit as ' + plural(sg.n, 'photo') + ' you tagged him in. Check the rack first.</span><button class="btn sm go" data-act="' + act + '" data-deer="' + esc(sg.id) + '" data-id="' + esc(p.id) + '">Yes, it’s him</button></div>';
+  }
+
+  /* ================= v3: states, rut, acorns, research layer ================= */
+  function SD() { return (window.BL_STATES && window.BL_STATES.states) || {}; }
+  var RUT_WORD = { rut: 'Peak rut', movement: 'Peak deer movement', breeding: 'Peak breeding' };
+  function mdToDate(md, year) { var p = md.split('-'); return new Date(year, p[0] - 1, +p[1], 12); }
+  function fmtMD(md) { var p = md.split('-'); return MON[p[0] - 1] + ' ' + (+p[1]); }
+  function rutWindows() {
+    var out = [];
+    S.settings.states.forEach(function (ab) {
+      var st = SD()[ab]; if (!st || !st.rut) return;
+      var ar = S.settings.areas[ab], a = null; (st.rut.areas || []).forEach(function (x) { if (x.name === ar) a = x; });
+      if (!a && st.rut.areas && st.rut.areas.length === 1) a = st.rut.areas[0];
+      out.push({ ab: ab, st: st, area: a });
+    });
+    return out;
+  }
+  function rutNote(from, to) {
+    var lines = [];
+    rutWindows().forEach(function (r) {
+      if (!r.area) { lines.push(r.st.name + ': ' + (RUT_WORD[r.st.rut.kind] || 'Rut timing') + ' has no area dates' + (r.st.rut.areas && r.st.rut.areas.length ? ' until you pick your area (More → States)' : '') + '.'); return; }
+      var y = from.getFullYear(), a0 = mdToDate(r.area.start, y), a1 = mdToDate(r.area.end, y);
+      if (a1 < a0) a1 = mdToDate(r.area.end, y + 1);
+      if (r.st.rut.kind === 'breeding') { a0 = new Date(a0.getTime() - 14 * DAYMS); a1 = new Date(a1.getTime() - 14 * DAYMS); }   // hunters see the most rut activity ~2 weeks before peak breeding (MDWFP)
+      var inside = to >= a0 && from <= a1;
+      lines.push(r.st.name + ' (' + r.area.name + '): ' + (r.st.rut.kind === 'breeding' ? 'rut activity likely about ' + fmtDate(a0) + ' – ' + fmtDate(a1) + ' (2 weeks before peak breeding)' : (RUT_WORD[r.st.rut.kind] || 'Rut') + ' ' + fmtDate(a0) + ' – ' + fmtDate(a1)) + '. This window is ' + (inside ? 'inside' : 'outside') + ' it. Evidence: ' + r.st.rut.strength + '.');
+    });
+    return lines;
+  }
+  function acornNoteFor() {
+    var out = [];
+    S.settings.states.forEach(function (ab) { var st = SD()[ab]; if (st && st.acorn) out.push(st.name + ' acorns (' + st.acorn.year + '): ' + st.acorn.summary); });
+    return out;
+  }
+  VIEWS.states = function () {
+    var D = SD(), keys = Object.keys(D).sort(function (a, b) { return D[a].name.localeCompare(D[b].name); });
+    var h = head('Your states', '#/more') + '<p class="muted small" style="margin-top:-4px">Pick where you hunt. You get rut timing and acorn info only for these states, from state wildlife agencies.</p>';
+    h += '<div class="paper" id="state-picker"><div class="stgrid">' + keys.map(function (ab) {
+      var st = D[ab], on = S.settings.states.indexOf(ab) >= 0;
+      return '<label class="stpick' + (on ? ' on' : '') + '"><input type="checkbox" data-state="' + ab + '"' + (on ? ' checked' : '') + '><b>' + esc(st.name) + '</b><span>' + (st.rut ? 'Rut ✓' : 'Rut: not yet') + ' · ' + (st.acorn ? 'Acorns ✓' : 'Acorns: not yet') + '</span></label>';
+    }).join('') + '</div>';
+    S.settings.states.forEach(function (ab) {
+      var st = D[ab]; if (!st || !st.rut || !st.rut.areas || st.rut.areas.length < 2) return;
+      h += '<label class="field" style="margin-top:10px"><span>' + esc(st.name) + ': your area</span><select data-area="' + ab + '"><option value="">Pick your area…</option>' + st.rut.areas.map(function (a) { return '<option' + (S.settings.areas[ab] === a.name ? ' selected' : '') + '>' + esc(a.name) + '</option>'; }).join('') + '</select></label>';
+    });
+    h += '<p class="tiny muted" style="margin:10px 0 0">Not listed? Your state is not available yet. We only show info we could check against a real source.</p>' +
+      '<a class="btn go block" style="margin-top:10px" href="#/research">See the research for my states</a></div>';
+    return h;
+  };
+  function strengthTag(s) { return '<span class="ev ev-' + esc(s) + '">' + esc(s) + ' evidence</span>'; }
+  function srcLinks(src) { return (src || []).map(function (x) { return '<a href="' + esc(x[1]) + '" target="_blank" rel="noopener">' + esc(x[0]) + '</a>'; }).join(' · '); }
+  VIEWS.research = function () {
+    var D = SD(), M = (window.BL_STATES && window.BL_STATES.meta) || {}, h = head('Research for your states', '#/more');
+    h += '<div class="panel small"><b>Your own cameras beat studies for a specific buck.</b> State numbers are averages over big areas and many deer. Use them as a backdrop; trust what your cameras show.</div>';
+    if (!S.settings.states.length) return h + '<div class="paper"><p style="margin:0 0 10px">Pick your states first.</p><a class="btn go block" href="#/states">Pick states</a></div>';
+    S.settings.states.forEach(function (ab) {
+      var st = D[ab]; if (!st) return;
+      h += '<div class="paper research" data-st="' + ab + '"><h3>' + esc(st.name) + '</h3>';
+      if (st.rut) {
+        var a = null; (st.rut.areas || []).forEach(function (x) { if (x.name === S.settings.areas[ab]) a = x; });
+        h += '<h4>' + esc(RUT_WORD[st.rut.kind] || 'Rut timing') + ' ' + strengthTag(st.rut.strength) + '</h4><p class="small">' + esc(st.rut.summary) + '</p>' +
+          (a ? '<p class="small"><b>Your area (' + esc(a.name) + '):</b> ' + esc(fmtMD(a.start)) + (a.end !== a.start ? ' – ' + esc(fmtMD(a.end)) : '') + (st.rut.kind === 'breeding' ? '. Hunters usually see the most rut activity about 2 weeks before peak breeding.' : '') + '</p>' : (st.rut.areas && st.rut.areas.length > 1 ? '<p class="small"><a href="#/states">Pick your area</a> to see your dates.</p>' : '')) +
+          '<p class="tiny muted">Source: ' + srcLinks(st.rut.src) + '</p>';
+      } else h += '<h4>Rut timing</h4><p class="small muted">Not available yet for ' + esc(st.name) + '. We could not confirm dates from the state agency.</p>';
+      if (st.acorn) h += '<h4>Acorns (' + st.acorn.year + ') ' + strengthTag(st.acorn.strength) + '</h4><p class="small">' + esc(st.acorn.summary) + '</p><p class="tiny muted">Source: ' + srcLinks(st.acorn.src) + '</p>';
+      else h += '<h4>Acorns</h4><p class="small muted">Not available yet. ' + esc(st.acornNote || '') + '</p>';
+      h += '<p class="tiny muted">Red oak acorns take two years to mature, so a poor red oak year can be followed by a better one (Virginia DWR). ' + strengthTag('strong') + '</p>';
+      if (st.drought) { var dr = st.drought; h += '<h4>Drought, week of ' + esc(fmtDate(dayFrom(dr.week))) + ' ' + strengthTag('strong') + '</h4><p class="small">' + Math.round(100 - dr.none) + '% of the state abnormally dry or worse · ' + Math.round(dr.d1) + '% in drought (D1+) · ' + Math.round(dr.d2) + '% severe or worse (D2+).</p><p class="tiny muted">Dry years can shrink acorn crops and pull deer to water and green food. ' + strengthTag('moderate') + ' Source: <a href="' + esc(M.drought && M.drought.url) + '" target="_blank" rel="noopener">' + esc(M.drought && M.drought.src) + '</a>. ' + esc(M.drought && M.drought.note) + '</p>'; }
+      if (st.crops && (st.crops.corn || st.crops.soy)) h += '<h4>Crop harvest ' + strengthTag('strong') + '</h4><p class="small">' + (st.crops.corn ? 'Corn harvested: ' + esc(st.crops.corn.now) + '% (5-year average ' + esc(st.crops.corn.avg) + '%). ' : '') + (st.crops.soy ? 'Soybeans: ' + esc(st.crops.soy.now) + '% (average ' + esc(st.crops.soy.avg) + '%).' : '') + '</p><p class="tiny muted">Standing corn is food and cover; when it comes down, deer shift. ' + strengthTag('moderate') + ' Source: <a href="' + esc(M.crops && M.crops.url) + '" target="_blank" rel="noopener">' + esc(M.crops && M.crops.src) + '</a>. ' + esc(M.crops && M.crops.note) + '</p>';
+      else h += '<h4>Crop harvest</h4><p class="small muted">Not in the national weekly report for this state.</p>';
+      h += '</div>';
+    });
+    h += '<p class="tiny muted">Info checked ' + esc(M.checked || '') + '. Links open the source. Anything we could not confirm is left out or marked not available.</p>';
+    return h;
+  };
+
+  /* ================= v3: predictions (sha256-locked, scored honestly) ================= */
+  // Plain JS SHA-256 (sync) so the lock works the same on every phone.
+  function sha256(str) {
+    var K = [0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2];
+    var bytes = unescape(encodeURIComponent(str)), l = bytes.length, words = [], i;
+    for (i = 0; i < l; i++) words[i >> 2] |= bytes.charCodeAt(i) << (24 - (i % 4) * 8);
+    words[l >> 2] |= 0x80 << (24 - (l % 4) * 8); words[(((l + 8) >> 6) << 4) + 15] = l * 8;
+    var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19], w = [];
+    function r(x, n) { return (x >>> n) | (x << (32 - n)); }
+    for (var j = 0; j < words.length; j += 16) {
+      var a = H[0], b = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], hh = H[7];
+      for (i = 0; i < 64; i++) {
+        if (i < 16) w[i] = words[j + i] | 0;
+        else { var s0 = r(w[i - 15], 7) ^ r(w[i - 15], 18) ^ (w[i - 15] >>> 3), s1 = r(w[i - 2], 17) ^ r(w[i - 2], 19) ^ (w[i - 2] >>> 10); w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0; }
+        var t1 = (hh + (r(e, 6) ^ r(e, 11) ^ r(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0, t2 = ((r(a, 2) ^ r(a, 13) ^ r(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+        hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+      }
+      H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0; H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + hh) | 0;
+    }
+    return H.map(function (x) { return ('00000000' + (x >>> 0).toString(16)).slice(-8); }).join('');
+  }
+  function predCanon(p) { return JSON.stringify({ v: 1, id: p.id, made: new Date(p.made).toISOString(), who: p.who, whoName: p.whoName, cam: p.cam, camName: p.camName, from: p.from, to: p.to, m0: p.m0, m1: p.m1, basis: p.basis, photosBefore: p.photosBefore, lastAdded: p.lastAdded }); }
+  function predOk(p) { return !!p.hash && sha256(predCanon(p)) === p.hash; }
+  function predEnd(p) { var d = dayFrom(p.to); d.setHours(0, 0, 0, 0); return new Date(d.getTime() + p.m1 * 60000); }
+  function predStatus(p) {
+    if (!predOk(p)) return { s: 'void', why: 'Changed after it was locked, so it doesn’t count.' };
+    if (!cam(p.cam) || (p.who !== 'bucks' && !deer(p.who))) return { s: 'void', why: 'The ' + (!cam(p.cam) ? 'camera' : 'buck') + ' was removed, so it can’t be scored.' };
+    var vs = visits(p.who === 'bucks' ? 'bucks' : 'deer:' + p.who, p.cam), hit = null;
+    vs.forEach(function (v) {
+      var day = ymdOf(v.d), m = v.d.getHours() * 60 + v.d.getMinutes();
+      if (day >= p.from && day <= p.to && m >= p.m0 && m <= p.m1 && v.photos.every(function (q) { return q.added > p.made; }) && (!hit || v.d < hit.d)) hit = v;
+    });
+    var end = predEnd(p), bait = S.bait.filter(function (b) { return b.cam === p.cam && b.day >= ymdOf(new Date(dayFrom(p.from).getTime() - 30 * DAYMS)) && b.day <= p.to; });
+    var r = { bait: bait };
+    if (hit) { r.s = 'hit'; r.v = hit; return r; }
+    var covered = S.pulls.some(function (u) { return u.cam === p.cam && u.at > end.getTime() && u.at > p.made; }) || P.some(function (q) { var e = q.cam === p.cam && q.added > p.made ? eff(q) : null; return e && e > end; });
+    r.s = covered ? 'miss' : (Date.now() > end.getTime() ? 'waiting' : 'open');
+    return r;
+  }
+  function predLimit() { var t = tier(); return t === 'elite' ? null : t === 'pro' ? { kind: 'open', n: C.PRO_OPEN_PRED_LIMIT || 5 } : { kind: 'total', n: C.FREE_PRED_LIMIT || 1 }; }
+  function canPredict() {
+    var L = predLimit(); if (!L) return true;
+    if (L.kind === 'total') return S.preds.length < L.n;
+    return S.preds.filter(function (p) { var s2 = predStatus(p).s; return s2 === 'open' || s2 === 'waiting'; }).length < L.n;
+  }
+  function predDraft(who, days) {
+    var vs = visits(who === 'bucks' ? 'bucks' : 'deer:' + who); if (vs.length < 3) return null;
+    var recent = vs.filter(function (v) { return Date.now() - v.d < 60 * DAYMS; }), base = recent.length >= 3 ? recent : vs, byCam = {};
+    base.forEach(function (v) { if (v.cam) byCam[v.cam] = (byCam[v.cam] || 0) + 1; });
+    var camId = topKey(byCam); if (!camId) return null;
+    var here = vs.filter(function (v) { return v.cam === camId; }), mins = here.map(function (v) { return v.d.getHours() * 60 + v.d.getMinutes(); });
+    var b = busiest(mins, 120); if (!b) return null;
+    var m0 = Math.floor(b.start / 15) * 15, m1 = Math.ceil(b.end / 15) * 15; if (m1 - m0 < 60) m1 = m0 + 60;
+    if (m1 > 1439 || m1 < m0) { m0 = Math.max(0, Math.min(m0, 1379)); m1 = Math.min(1439, m0 + 120); }
+    var from = new Date(Date.now() + DAYMS), to = new Date(from.getTime() + ((days || 7) - 1) * DAYMS);
+    return { who: who, cam: camId, from: ymdOf(from), to: ymdOf(to), m0: m0, m1: m1, n: here.length, inWin: b.count, last: here[0] };
+  }
+  function predBasis(dr) {
+    var name = dr.who === 'bucks' ? 'Bucks' : deer(dr.who).name, out = [];
+    out.push(name + ': ' + plural(dr.n, 'visit') + ' at ' + camName(dr.cam) + ', ' + dr.inWin + ' of them between ' + fmtMin(dr.m0) + ' and ' + fmtMin(dr.m1) + '.');
+    if (dr.last) out.push('Last seen there ' + fmtDate(dr.last.d) + ' at ' + fmtTime(dr.last.d) + '.');
+    rutNote(dayFrom(dr.from), dayFrom(dr.to)).forEach(function (l) { out.push(l); });
+    acornNoteFor().forEach(function (l) { out.push(l); });
+    var bt = baitBefore(dr.cam, new Date()); if (bt && bt.days <= 30) out.push('Bait logged at this camera ' + (bt.days ? plural(bt.days, 'day') + ' ago' : 'today') + '.');
+    return out;
+  }
+  function makePrediction(dr) {
+    var last = 0; P.forEach(function (q) { if (q.added > last) last = q.added; });
+    var p = { id: uid(), who: dr.who, whoName: dr.who === 'bucks' ? 'Any buck' : deer(dr.who).name, cam: dr.cam, camName: camName(dr.cam), from: dr.from, to: dr.to, m0: dr.m0, m1: dr.m1, made: Date.now(), basis: predBasis(dr), photosBefore: P.length, lastAdded: last };
+    p.hash = sha256(predCanon(p)); S.preds.push(p); return flush().then(function () { return p; });
+  }
+  function predText(p) { return p.whoName + ' shows up at ' + p.camName + ' between ' + fmtMin(p.m0) + ' and ' + fmtMin(p.m1) + ', at least once from ' + fmtDate(dayFrom(p.from)) + (p.to !== p.from ? ' to ' + fmtDate(dayFrom(p.to)) : '') + '.'; }
+  function predCard(p) {
+    var st = predStatus(p), cls = st.s, label = { hit: 'Hit', miss: 'Miss', open: 'Waiting for the window', waiting: 'Window over: pull the card to score it', void: 'Not counted' }[cls];
+    var h = '<div class="pred ' + cls + '" data-pred="' + esc(p.id) + '"><div class="pred-top"><b>' + label + '</b><span class="tiny muted">Locked ' + esc(fmtDT(new Date(p.made))) + '</span></div><p style="margin:6px 0">' + esc(predText(p)) + '</p>';
+    if (cls === 'hit') h += '<p class="small" style="margin:0 0 4px">✓ ' + (p.who === 'bucks' ? 'A buck' : 'He') + ' showed ' + esc(fmtDate(st.v.d)) + ' at ' + esc(fmtTime(st.v.d)) + '.</p>';
+    if (cls === 'miss') h += '<p class="small" style="margin:0 0 4px">✗ Missed. ' + (p.who === 'bucks' ? 'No buck showed' : esc(p.whoName) + ' didn’t show') + ' at ' + esc(p.camName) + ' in that window, and the camera was running after it. That counts as a miss.</p>';
+    if (cls === 'void') h += '<p class="small" style="margin:0 0 4px">' + esc(st.why) + '</p>';
+    if (cls === 'hit' || cls === 'miss') h += '<p class="tiny" style="margin:0 0 4px">' + (st.bait.length ? '⚠ Bait was logged at this camera (' + esc(st.bait.map(function (b) { return fmtDate(dayFrom(b.day)) + (b.what ? ' ' + b.what : ''); }).join(', ')) + '). Bait pulls deer in, so this is not a clean test.' : 'No bait logged at this camera: a clean test.') + '</p>';
+    h += '<details><summary class="tiny">Why this prediction · fingerprint</summary><ul class="tiny">' + p.basis.map(function (b) { return '<li>' + esc(b) + '</li>'; }).join('') + '</ul><p class="tiny mono" style="word-break:break-all">sha256 ' + esc(p.hash) + (predOk(p) ? ' ✓ matches' : ' ✗ does not match') + '</p></details></div>';
+    return h;
+  }
+  var predForm = { who: '', days: 7 };
+  VIEWS.predict = function () {
+    var h = head('Predictions', '#/bucks'), L = predLimit();
+    var scored = S.preds.map(function (p) { return { p: p, s: predStatus(p) }; }), hits = 0, miss = 0, cH = 0, cM = 0;
+    scored.forEach(function (x) { if (x.s.s === 'hit') { hits++; if (!x.s.bait.length) cH++; } if (x.s.s === 'miss') { miss++; if (!x.s.bait.length) cM++; } });
+    h += '<div class="paper"><p style="margin:0 0 6px"><b>Score: ' + plural(hits, 'hit') + ', ' + plural(miss, 'miss', 'misses') + '</b>' + (hits + miss ? ' · clean tests (no bait): ' + cH + ' hit, ' + cM + ' miss' : '') + '</p>' +
+      '<p class="tiny muted" style="margin:0">Each prediction is locked with the time and a sha256 fingerprint on this phone before new photos come in. It is scored only against photos you add later. Misses stay on the record.</p></div>';
+    var whoOpts = S.deer.map(function (b) { return [b.id, '★ ' + b.name]; }).concat([['bucks', 'Any buck']]);
+    if (!predForm.who || !whoOpts.some(function (o) { return o[0] === predForm.who; })) predForm.who = whoOpts[0] ? whoOpts[0][0] : 'bucks';
+    h += '<div class="paper" id="pred-new"><h3>New prediction</h3>';
+    if (!canPredict()) {
+      h += '<p class="small">' + (L.kind === 'total' ? 'Free includes one prediction and its scored result. <a href="#/more">Pro or Elite</a> let you keep predicting.' : 'Pro keeps up to ' + L.n + ' open predictions at a time. Score one (pull the card) or <a href="#/more">upgrade to Elite</a> for unlimited.') + '</p>';
+    } else {
+      var dr = predDraft(predForm.who, predForm.days);
+      h += '<div class="dt2"><label class="field"><span>Who</span><select id="pred-who">' + whoOpts.map(function (o) { return '<option value="' + esc(o[0]) + '"' + (o[0] === predForm.who ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('') + '</select></label>' +
+        '<label class="field"><span>Over the next</span><select id="pred-days">' + [3, 7, 14].map(function (n) { return '<option value="' + n + '"' + (n === predForm.days ? ' selected' : '') + '>' + n + ' days</option>'; }).join('') + '</select></label></div>';
+      if (!dr) h += '<p class="small muted">Needs at least 3 timed visits for him first. The prediction is built from your own visits.</p>';
+      else {
+        h += '<label class="field"><span>Camera</span><select id="pred-cam">' + S.cameras.map(function (c) { return '<option value="' + esc(c.id) + '"' + (c.id === dr.cam ? ' selected' : '') + '>' + esc(c.name) + '</option>'; }).join('') + '</select></label>' +
+          '<div class="dt2"><label class="field"><span>From</span><input type="time" id="pred-m0" value="' + pad(Math.floor(dr.m0 / 60)) + ':' + pad(dr.m0 % 60) + '"></label><label class="field"><span>To</span><input type="time" id="pred-m1" value="' + pad(Math.floor(dr.m1 / 60)) + ':' + pad(dr.m1 % 60) + '"></label></div>' +
+          '<ul class="small read">' + predBasis(dr).map(function (b) { return '<li>' + esc(b) + '</li>'; }).join('') + '</ul>' +
+          '<button class="btn go block" data-act="pred-lock" data-from="' + dr.from + '" data-to="' + dr.to + '">Lock it in</button><p class="tiny muted" style="margin:6px 0 0">Once locked it can’t be edited. Window: ' + esc(fmtDate(dayFrom(dr.from))) + ' – ' + esc(fmtDate(dayFrom(dr.to))) + '. Your own cameras beat studies for a specific buck.</p>';
+      }
+    }
+    h += '</div>';
+    h += S.preds.slice().reverse().map(predCard).join('');
+    return h;
+  };
+  VIEWS.predict.after = function () {
+    var w = $('#pred-who'), d = $('#pred-days');
+    if (w) w.addEventListener('change', function () { predForm.who = w.value; render(); });
+    if (d) d.addEventListener('change', function () { predForm.days = Number(d.value) || 7; render(); });
+  };
+
+  /* ================= v3: 3D terrain sim host ================= */
+  function demKey(box) { return box.lat.toFixed(5) + ',' + box.lng.toFixed(5) + ',' + box.acres; }
+  function fetchDem() {
+    var box = S.t3 && S.t3.box; if (!box || !window.BLTerrain) return Promise.resolve(false);
+    if (!navigator.onLine) { toast('No internet right now. Try again when you’re online.', 3500); return Promise.resolve(false); }
+    toast('Getting USGS elevation…', 4000);
+    return fetch(BLTerrain.demURL(box)).then(function (r) { if (!r.ok) throw new Error('usgs ' + r.status); return r.arrayBuffer(); }).then(function (buf) {
+      var z = null; try { z = BLTerrain.cleanDem(BLTerrain.parseTiff(buf)); } catch (e) { z = null; }
+      if (!z) { toast('USGS has no elevation for that spot. The 3D sim covers the US only.', 5000); return false; }
+      DEM = { key: demKey(box), z: z, at: Date.now() };
+      return kvPut('dem', { key: DEM.key, z: Array.prototype.slice.call(z), at: DEM.at }).then(function () { toast('Elevation saved on this phone'); return true; });
+    }).catch(function () { toast('Couldn’t reach USGS. Try again later.', 4000); return false; });
+  }
+  var MANUAL_WIND = { wd: 225, ws: 6 };
+  var WIND_WORDS = [['Calm', 0], ['Light', 5], ['Breezy', 12], ['Windy', 20]];
+  function t3Host(demo) {
+    var exMap = window.BuckSim ? window.BuckSim.example() : null;
+    if (demo) return {
+      demo: true, hour: 17, day: new Date(2026, 10, 8, 12),
+      dem: function () { return BLTerrain.exampleDem(); }, map: function () { return exMap; }, box: function () { return { lat: 38, lng: -90, acres: 160 }; },
+      parking: function () { return [{ x: 1, y: 24 }]; }, sunTimes: function (d) { return sunTimes(d, 38, -90); },
+      air: function () { return null; }, manualAir: function () { return { wd: 225, ws: 6, cc: 20 }; },
+      airNote: function () { return '<p class="tiny muted" style="margin:4px 0">Demo air: light wind from the southwest, clear sky.</p>'; }
+    };
+    var box = S.t3.box;
+    return {
+      hour: new Date().getHours(), day: new Date(),
+      dem: function () { return DEM && DEM.key === demKey(box) ? DEM.z : null; }, map: function () { return S.map; }, box: function () { return box; },
+      parking: function () { return S.t3.parking; }, sunTimes: function (d) { return sunTimes(d, box.lat, box.lng); },
+      air: function (d) { var h = window.BLWx ? BLWx.hourAt(WX, box.lat, box.lng, d) : null; return h && h.wd !== null ? { wd: h.wd, ws: h.ws || 0, cc: h.cc, t: h.t } : null; },
+      manualAir: function () { return { wd: MANUAL_WIND.wd, ws: MANUAL_WIND.ws, cc: 30 }; },
+      airNote: function (d) {
+        var h = window.BLWx ? BLWx.hourAt(WX, box.lat, box.lng, d) : null;
+        if (h && h.wd !== null) return '<p class="tiny muted" style="margin:4px 0">Real weather for this day (Open-Meteo).</p>';
+        return '<div class="t3-manual"><p class="tiny muted" style="margin:4px 0">No weather saved for this day. <button class="btn sm ink" data-act="t3-wx">Get weather for this day</button> or pick the wind:</p>' +
+          '<div class="btn-row"><select id="t3-wd" aria-label="Wind from">' + C8L.map(function (n, i) { return '<option value="' + (i * 45) + '"' + (i * 45 === MANUAL_WIND.wd ? ' selected' : '') + '>From the ' + n + '</option>'; }).join('') + '</select>' +
+          '<select id="t3-ws" aria-label="Wind strength">' + WIND_WORDS.map(function (w) { return '<option value="' + w[1] + '"' + (w[1] === MANUAL_WIND.ws ? ' selected' : '') + '>' + w[0] + '</option>'; }).join('') + '</select></div></div>';
+      },
+      onDay: function (d) { t3Day = d; }
+    };
+  }
+  var t3Day = null, t3Api = null;
+  function parkSheet() {
+    var m = S.map; if (!m) return;
+    var Z = { B: '#345c2e', F: '#c4a84e', W: '#4680aa', C: '#4076a0', N: '#788c46', R: '#968c80', X: '#965046', '.': '#68804c' };
+    sheet('<h2>Where do you park?</h2><p class="muted small">Tap squares to mark parking (up to 6). Tap again to remove.</p><canvas id="park-cv" width="300" height="390" style="width:100%;max-width:300px;touch-action:none;display:block;margin:0 auto"></canvas><div class="btn-row" style="margin-top:10px"><button class="btn go" data-x="close">Done</button></div>', function (x) { if (x === 'close') { closeSheet(); render(); return false; } });
+    var cv = $('#park-cv'), g = cv.getContext('2d'), cs = 15;
+    function draw() {
+      for (var i = 0; i < 520; i++) { g.fillStyle = Z[m.cells[i]] || Z['.']; g.fillRect((i % 20) * cs, ((i / 20) | 0) * cs, cs - 1, cs - 1); }
+      m.stands.forEach(function (s) { g.fillStyle = '#fff'; g.beginPath(); g.arc(s.x * cs + 7, s.y * cs + 7, 4, 0, 7); g.fill(); });
+      S.t3.parking.forEach(function (p) { g.fillStyle = '#1d3557'; g.fillRect(p.x * cs + 1, p.y * cs + 1, cs - 3, cs - 3); g.fillStyle = '#fff'; g.font = 'bold 11px sans-serif'; g.fillText('P', p.x * cs + 4, p.y * cs + 11); });
+    }
+    cv.addEventListener('click', function (e) {
+      var r = cv.getBoundingClientRect(), x = Math.floor((e.clientX - r.left) / r.width * 20), y = Math.floor((e.clientY - r.top) / r.height * 26);
+      if (x < 0 || y < 0 || x > 19 || y > 25) return;
+      var k = -1; S.t3.parking.forEach(function (p, i) { if (p.x === x && p.y === y) k = i; });
+      if (k >= 0) S.t3.parking.splice(k, 1); else if (S.t3.parking.length < 6) S.t3.parking.push({ x: x, y: y }); else toast('Up to 6 parking spots');
+      save(); draw();
+    });
+    draw();
+  }
+  function sim3dHtml() {
+    if (!isElite()) {
+      var t = tier();
+      return '<div class="paper" id="t3-locked"><h3>🔒 3D Terrain Sim is Elite</h3><p class="small">Your real ground in 3D from USGS elevation, with wind, rising and sinking air and your moving scent. Stands turn green, yellow or red with a plain reason, and it finds your safest walk-in. Pick a real day and slide through it.</p>' +
+        (t === 'pro' ? buyBtn('upgrade', 'Upgrade to Elite') : buyBtn('elite', 'Get Elite')) + (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more">I have a license key</a>' : '') + '</div>' +
+        '<div class="paper"><h3>Try the demo</h3><p class="tiny muted" style="margin:0 0 6px">Example property, made up. It is not a real place and not your land.</p><div id="t3-root"></div></div>';
+    }
+    var box = S.t3 && S.t3.box;
+    if (!box) {
+      return '<div class="paper" id="t3-setup"><h3>Set up your 3D ground</h3><p class="small">The 3D sim lays your 2D map (bedding, food, stands) on real USGS elevation. <b>US only.</b></p>' +
+        (hasLoc() ? '' : '<p class="small" style="color:#9a2f1c">Add your property location first (More → Property location).</p>') +
+        (S.map ? '' : '<p class="small" style="color:#9a2f1c">Draw your property in the 2D map first (bedding, food, stands).</p>') +
+        '<label class="field"><span>Map size (acres), centred on your property location</span><input type="number" id="t3-acres" min="5" max="5000" value="' + (S.map && !S.map.example ? S.map.acres : 160) + '"></label>' +
+        '<button class="btn go block" data-act="t3-box"' + (hasLoc() && S.map ? '' : ' disabled') + '>Use this box</button><p class="tiny muted" style="margin:6px 0 0">North is up. The box is the same shape as your 2D map.</p></div>';
+    }
+    var have = DEM && DEM.key === demKey(box);
+    if (!have) return '<div class="paper" id="t3-fetch"><h3>Get your elevation</h3><p class="small">One download from USGS 3DEP for your box (about 70 KB). It is saved on this phone, so you only do this once. Only the box corners are sent.</p><button class="btn go block" data-act="t3-dem">Get USGS elevation</button><button class="btn ink block" style="margin-top:8px" data-act="t3-reset">Change the box</button></div>';
+    return '<div id="t3-root"></div><div class="btn-row" style="margin-top:8px"><button class="btn ink" data-act="t3-park">Mark parking</button><a class="btn ink" href="#/sim">Edit 2D map</a><button class="btn ink" data-act="t3-reset">Change box</button></div>' +
+      '<p class="tiny muted">Model, not a promise: wind and slope air from textbook formulas (Turner stability, Briggs plume spread), deer routes from your own bedding and food marks. Read the why for each stand.</p>';
+  }
+  function mount3d() {
+    var el = $('#t3-root'); if (!el || !window.BLTerrain) return;
+    var demo = !isElite(); if (!demo && !(S.t3 && S.map)) return;
+    t3Api = BLTerrain.mount(el, t3Host(demo));
+    if (t3Day && !demo) { var dt = el.querySelector('.t3-date'); if (dt) { dt.value = ymdOf(t3Day); dt.dispatchEvent(new Event('change', { bubbles: true })); } }
+  }
+  document.addEventListener('change', function (e) {
+    if (e.target && (e.target.id === 't3-wd' || e.target.id === 't3-ws')) { MANUAL_WIND.wd = Number($('#t3-wd').value); MANUAL_WIND.ws = Number($('#t3-ws').value); if (t3Api) t3Api.refresh(); }
+    if (e.target && e.target.getAttribute && e.target.getAttribute('data-state')) {
+      var ab = e.target.getAttribute('data-state'), i = S.settings.states.indexOf(ab);
+      if (e.target.checked && i < 0) S.settings.states.push(ab); else if (!e.target.checked && i >= 0) { S.settings.states.splice(i, 1); delete S.settings.areas[ab]; }
+      S.settings.statesAsked = true; save(); render();
+    }
+    if (e.target && e.target.getAttribute && e.target.getAttribute('data-area')) { var a2 = e.target.getAttribute('data-area'); if (e.target.value) S.settings.areas[a2] = e.target.value; else delete S.settings.areas[a2]; save(); toast('Area saved'); }
+  });
+
+
+  /* ================= v3: photo / buck / camera extras ================= */
+  function visibleDeer() { return S.settings.hideSmall ? S.deer.filter(function (b) { return b.points === null || b.points > S.settings.smallMax; }) : S.deer.slice(); }
+  function visitDetailsPhoto(p) {
+    var vs = visits('any', p.cam), v = null;
+    vs.some(function (x) { if (x.photos.indexOf(p) >= 0) { v = x; return true; } return false; });
+    if (!v) { var d = eff(p); v = { d: d, end: d, cam: p.cam, photos: [p] }; }
+    return visitDetails(v, 'any', p);
+  }
+  function photoExtras(p) {
+    var c = cam(p.cam), h = '<hr><h3>Temp on the ribbon</h3><div style="display:flex;gap:8px;align-items:flex-end"><label class="field" style="flex:1;margin:0"><span>°F printed on the photo</span><input type="number" id="ph-temp" inputmode="numeric" min="-40" max="130" value="' + (p.temp === null ? '' : p.temp) + '"></label><button class="btn ink" data-act="ph-temp" data-id="' + esc(p.id) + '">Save</button></div>' +
+      (p.thumb ? '<button class="btn ink block" style="margin-top:8px" data-act="ph-ocr" data-id="' + esc(p.id) + '">Read temp from photo</button><p class="tiny muted" id="ocr-msg" style="margin:6px 0 0">Reads the ribbon on this phone (first use loads the reader, about 10 MB). Always check the number before you save.</p>' : '');
+    h += '<hr><h3>Which way was he moving?</h3><div class="btn-row">' + ['L', 'R', 'T', 'A'].map(function (k) { return '<button class="tok' + (p.dir === k ? ' on' : '') + '" data-act="ph-dir" data-dir="' + k + '" data-id="' + esc(p.id) + '">' + { L: '← Left', R: 'Right →', T: 'Toward', A: 'Away' }[k] + '</button>'; }).join('') + '</div>';
+    if (c && c.rotating) h += '<label class="field" style="margin-top:8px"><span>Camera view (rotating camera)</span><select id="ph-zone" data-id="' + esc(p.id) + '"><option value="">Pick the view…</option>' + c.zones.map(function (z) { return '<option' + (p.zone === z.name ? ' selected' : '') + '>' + esc(z.name) + '</option>'; }).join('') + '</select></label>';
+    var hd = headingOf(p);
+    h += '<p class="small" style="margin:6px 0 0">' + (hd !== null ? 'Travel heading: <b>' + C8L[c8(hd)] + '</b>' : (p.dir ? 'Set which way the camera faces (Cameras) to get his heading.' : 'Tap a direction to log his travel heading.')) + '</p>';
+    return h;
+  }
+  function buckExtras(b, vs) {
+    var h = '<div class="paper" id="buck-extra"><h3>Profile</h3><div style="display:flex;gap:12px;align-items:center">' + (b.photo && PI[b.photo] && PI[b.photo].thumb ? '<img class="thumb" style="width:84px;height:64px;object-fit:cover;border-radius:8px" alt="" src="' + thumbURL(PI[b.photo]) + '">' : '<span class="thumb">★</span>') +
+      '<div>' + (b.points !== null ? '<p style="margin:0"><b>' + b.points + ' points</b></p>' : '') + '<button class="btn sm ink" data-act="buck-photo" data-id="' + esc(b.id) + '"' + (vs.length ? '' : ' disabled') + '>Pick profile photo</button></div></div>';
+    if (b.renames.length) h += '<p class="small" style="margin:8px 0 0">Was called: ' + b.renames.slice().reverse().map(function (r) { return '<b>' + esc(r.from) + '</b> (until ' + esc(fmtDay(r.at)) + ')'; }).join(', ') + '</p>';
+    h += '<a class="btn ink block" style="margin-top:10px" href="#/predict">Predict his next visit</a></div>';
+    return h;
+  }
+  function camExtras(c) {
+    var opts = function (sel) { return '<option value="">Not set</option>' + C8L.map(function (n, i) { return '<option value="' + (i * 45) + '"' + (sel === i * 45 ? ' selected' : '') + '>' + n.charAt(0).toUpperCase() + n.slice(1) + '</option>'; }).join(''); };
+    var h = '<div class="paper" id="cam-facing"><h3>Which way does it face?</h3><p class="tiny muted" style="margin:0 0 8px">The direction the lens looks. With this, the way a deer crosses the frame becomes a travel heading.</p>' +
+      '<label class="field"><span>Facing</span><select id="cam-face"' + (c.rotating ? ' disabled' : '') + '>' + opts(c.facing) + '</select></label>' +
+      '<label class="chk"><input type="checkbox" id="cam-rot"' + (c.rotating ? ' checked' : '') + '> It rotates or has more than one view</label>';
+    if (c.rotating || !c.zones.length) h += '<div id="cam-zones"' + (c.rotating ? '' : ' style="display:none"') + '>' + (c.zones.length ? c.zones : [{ name: 'View 1', facing: 0 }]).map(function (z, i) { return '<div class="dt2 zone"><input type="text" maxlength="30" class="z-name" value="' + esc(z.name) + '" aria-label="View name"><select class="z-face" aria-label="View facing">' + opts(z.facing).replace('<option value="">Not set</option>', '') + '</select></div>'; }).join('') + '<button class="btn sm plain" data-act="cam-zone-add">＋ Add a view</button></div>';
+    else h += '<div id="cam-zones" style="display:none">' + c.zones.map(function (z) { return '<div class="dt2 zone"><input type="text" maxlength="30" class="z-name" value="' + esc(z.name) + '"><select class="z-face">' + opts(z.facing).replace('<option value="">Not set</option>', '') + '</select></div>'; }).join('') + '<button class="btn sm plain" data-act="cam-zone-add">＋ Add a view</button></div>';
+    h += '<button class="btn ink block" style="margin-top:8px" data-act="cam-face-save" data-id="' + esc(c.id) + '">Save facing</button></div>';
+    var ev = S.bait.filter(function (b) { return b.cam === c.id; }).sort(function (a, b) { return a.day < b.day ? 1 : -1; });
+    h += '<div class="paper" id="cam-bait"><h3>Bait log</h3><p class="tiny muted" style="margin:0 0 8px">Log when you put bait or feed out. Visits show days since bait, and predictions at baited cameras are flagged: they are not a clean test.</p>' +
+      '<div class="dt2"><label class="field"><span>Day</span><input type="date" id="bait-day" value="' + ymdOf(new Date()) + '"></label><label class="field"><span>What</span><input type="text" id="bait-what" maxlength="60" placeholder="Corn, mineral…"></label></div>' +
+      '<button class="btn ink block" data-act="bait-add" data-id="' + esc(c.id) + '">Log bait</button>' +
+      (ev.length ? '<ul class="list small" style="margin-top:8px">' + ev.map(function (b) { return '<li class="baitrow"><span>' + esc(fmtDate(dayFrom(b.day))) + (b.what ? ' · ' + esc(b.what) : '') + '</span><button class="btn sm plain" data-act="bait-del" data-id="' + esc(b.id) + '">Remove</button></li>'; }).join('') + '</ul>' : '') + '</div>';
+    return h;
+  }
+  document.addEventListener('change', function (e) {
+    if (e.target && e.target.id === 'cam-rot') { var z = $('#cam-zones'); if (z) z.style.display = e.target.checked ? '' : 'none'; var f = $('#cam-face'); if (f) f.disabled = e.target.checked; }
+    if (e.target && e.target.id === 'ph-zone') { var p = PI[e.target.getAttribute('data-id')]; if (p) { p.zone = e.target.value || null; photoPut(p); render(); } }
+  });
 
   /* ---------------- sheets ---------------- */
   function promptSheet(title, body, yes, val) {
@@ -1171,8 +1655,8 @@
   function proSheet(kind) {
     var t = tier(), what = kind === 'cam' ? plural(camLimit(), 'camera') : plural(buckLimit(), 'named buck');
     var body = t === 'free'
-      ? '<p>The free version keeps ' + what + '. <b>Pro</b>' + (priceOf('pro') ? ' (' + esc(priceOf('pro')) + ')' : '') + ' keeps ' + plural(C.PRO_CAMERA_LIMIT, 'camera') + ' and ' + plural(C.PRO_BUCK_LIMIT, 'named buck') + '. <b>Elite</b>' + (priceOf('elite') ? ' (' + esc(priceOf('elite')) + ')' : '') + ' is unlimited and adds the Movement Simulator. ' + esc(C.PRO_PRICE_NOTE || '') + '</p>' + buyBtn('pro', 'Get Pro') + '<div style="height:8px"></div>' + buyBtn('elite', 'Get Elite')
-      : '<p>Pro keeps ' + what + '. <b>Elite</b> is unlimited and adds the Movement Simulator. Pro owners pay just the difference.</p>' + buyBtn('upgrade', 'Upgrade to Elite');
+      ? '<p>The free version keeps ' + what + '. <b>Pro</b>' + (priceOf('pro') ? ' (' + esc(priceOf('pro')) + ')' : '') + ' keeps ' + plural(C.PRO_CAMERA_LIMIT, 'camera') + ' and ' + plural(C.PRO_BUCK_LIMIT, 'named buck') + '. <b>Elite</b>' + (priceOf('elite') ? ' (' + esc(priceOf('elite')) + ')' : '') + ' is unlimited and adds the 2D and 3D simulators. ' + esc(C.PRO_PRICE_NOTE || '') + '</p>' + buyBtn('pro', 'Get Pro') + '<div style="height:8px"></div>' + buyBtn('elite', 'Get Elite')
+      : '<p>Pro keeps ' + what + '. <b>Elite</b> is unlimited and adds the 2D and 3D simulators. Pro owners pay just the difference.</p>' + buyBtn('upgrade', 'Upgrade to Elite');
     sheet('<h2>' + TIER_NAME[t] + ' limit reached</h2>' + body + (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more" data-x="close">I have a license key</a>' : '') +
       '<button class="btn ink block" style="margin-top:8px" data-x="close">Not now</button>');
   }
@@ -1201,7 +1685,7 @@
     var photos = [];
     return P.reduce(function (pr, p) {
       return pr.then(function () {
-        var o = { id: p.id, cam: p.cam, pull: p.pull, name: p.name, size: p.size, t: p.t, tsrc: p.tsrc, fileT: p.fileT, tags: p.tags, deer: p.deer, done: p.done, added: p.added };
+        var o = { id: p.id, cam: p.cam, pull: p.pull, name: p.name, size: p.size, t: p.t, tsrc: p.tsrc, fileT: p.fileT, tags: p.tags, deer: p.deer, done: p.done, added: p.added, temp: p.temp, tempSrc: p.tempSrc, dir: p.dir, zone: p.zone };
         photos.push(o);
         if (withPhotos && p.thumb) return blobToDataURL(p.thumb).then(function (u) { o.thumb = u; });
       });
@@ -1242,11 +1726,14 @@
   function csvCell(v) { v = String(v == null ? '' : v); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
   function exportCSV() {
     var vs = visits('any');
-    var rows = [['date', 'time', 'end_time', 'camera', 'who', 'light', 'sun', 'photos', 'time_source', 'files']];
+    var rows = [['date', 'time', 'end_time', 'camera', 'who', 'light', 'sun', 'period', 'moon_phase', 'moon_lit_pct', 'wind_dir', 'wind_mph', 'gust_mph', 'air_temp_f', 'pressure_hpa', 'rain_in', 'ribbon_temp_f', 'heading', 'days_since_bait', 'photos', 'time_source', 'files']];
     vs.slice().reverse().forEach(function (v) {
       var srcs = {}; v.photos.forEach(function (p) { srcs[p.tsrc || ''] = 1; });
       rows.push([v.d.getFullYear() + '-' + pad(v.d.getMonth() + 1) + '-' + pad(v.d.getDate()), pad(v.d.getHours()) + ':' + pad(v.d.getMinutes()), pad(v.end.getHours()) + ':' + pad(v.end.getMinutes()),
-        camName(v.cam), whoOf(v), v.light ? LIGHT_LABEL[v.light] : '', sunNote(v.d), v.photos.length, Object.keys(srcs).join('+'), v.photos.map(function (p) { return p.name; }).join(' ')]);
+        camName(v.cam), whoOf(v), v.light ? LIGHT_LABEL[v.light] : '', sunNote(v.d)].concat((function () {
+          var per = periodOf(v.d), mo = moonInfo(v.d), w = wxAt(v.d), hd = visitHeading(v), bt = baitBefore(v.cam, v.d), tp = tempOfVisit(v);
+          return [per ? PERIOD_LABEL[per] : '', mo ? mo.name : '', mo ? mo.pct : '', w && w.wd !== null ? BLWx.compass(w.wd) : '', w && w.ws !== null ? Math.round(w.ws) : '', w && w.wg !== null ? Math.round(w.wg) : '', w && w.t !== null ? Math.round(w.t) : '', w && w.p !== null ? Math.round(w.p) : '', w && w.r !== null ? w.r : '', tp === null ? '' : tp, hd === null ? '' : C8[c8(hd)], bt ? bt.days : ''];
+        })(), [v.photos.length, Object.keys(srcs).join('+'), v.photos.map(function (p) { return p.name; }).join(' ')]));
     });
     var csv = rows.map(function (r) { return r.map(csvCell).join(','); }).join('\r\n');
     return saveFile(new Blob(['\ufeff' + csv], { type: 'text/csv' }), 'buck-ledger-' + stamp() + '.csv', 'text/csv').then(function (ok) { if (ok) toast('Exported ' + plural(vs.length, 'visit')); });
@@ -1305,7 +1792,12 @@
       }
       case 'ph-del': confirmSheet('Delete this photo?', 'It’s removed from this phone and your ledger.', 'Delete', true).then(function (ok) { if (ok) deletePhotos([id]).then(function () { toast('Photo deleted'); history.length > 1 ? history.back() : go('#/'); }); }); return;
       case 'add-buck': { var nm = ($('#new-buck').value || '').trim(); if (!nm) { toast('Type a name'); return; } if (addBuck(nm)) { toast('Added ' + nm); render(); } return; }
-      case 'buck-save': { var b = deer(id); if (!b) return; var n2 = ($('#buck-name').value || '').trim(); if (n2) b.name = clampStr(n2, 60); b.notes = clampStr($('#buck-notes').value, 2000); save(); toast('Saved'); render(); return; }
+      case 'buck-save': {
+        var b = deer(id); if (!b) return; var n2 = ($('#buck-name').value || '').trim();
+        if (n2 && clampStr(n2, 60) !== b.name) { b.renames.push({ from: b.name, at: Date.now() }); if (b.renames.length > 50) b.renames.shift(); b.name = clampStr(n2, 60); }
+        var pv = ($('#buck-points') || {}).value; if (pv === '' || pv === undefined) b.points = null; else { var pn = Number(pv); if (!isFinite(pn) || pn < 0 || pn > 40) { toast('Points 0–40, or leave it blank'); return; } b.points = Math.round(pn); }
+        b.notes = clampStr($('#buck-notes').value, 2000); save(); toast('Saved'); render(); return;
+      }
       case 'buck-del': confirmSheet('Remove this buck?', 'His photos stay in the ledger, just without his name.', 'Remove', true).then(function (ok) {
         if (!ok) return; S.deer = S.deer.filter(function (x) { return x.id !== id; });
         var ch = []; P.forEach(function (p) { var i2 = p.deer.indexOf(id); if (i2 >= 0) { p.deer.splice(i2, 1); if (p.tags.indexOf('buck') < 0) p.tags.push('buck'); ch.push(p); } });
@@ -1352,8 +1844,69 @@
       }
       case 'erase': confirmSheet('Erase everything?', 'All photos, cameras, bucks and tags on this phone will be deleted. This can’t be undone.', 'Erase', true).then(function (ok) {
         if (!ok) return; var lic = S.settings.license, dev = S.settings.deviceId;
-        photosClear().then(function () { Object.keys(urlCache).forEach(dropURL); P = []; PI = {}; S = defaults(); S.settings.license = lic; S.settings.deviceId = dev; return flush(); }).then(function () { toast('Erased'); go('#/'); });
+        photosClear().then(function () { Object.keys(urlCache).forEach(dropURL); P = []; PI = {}; S = defaults(); S.settings.license = lic; S.settings.deviceId = dev; WX = {}; DEM = null; return Promise.all([kvPut('wx', {}), kvPut('dem', null)]).then(flush); }).then(function () { toast('Erased'); go('#/'); });
       }); return;
+      case 'states-later': S.settings.statesAsked = true; save(); var sp = $('#state-prompt'); if (sp) sp.remove(); return;
+      case 'small-show': S.settings.hideSmall = false; save(); render(); return;
+      case 'small-hide': S.settings.hideSmall = true; save(); render(); return;
+      case 'ph-suggest': { var ps = PI[id], did2 = a.getAttribute('data-deer'); if (!ps || !deer(did2)) return; if (ps.deer.indexOf(did2) < 0) ps.deer.push(did2); ps.tags = ps.tags.filter(function (x) { return x !== 'empty'; }); ps.done = true; photoPut(ps); toast('Tagged ' + deer(did2).name); render(); return; }
+      case 'ph-temp': { var pt2 = PI[id]; if (!pt2) return; var tv3 = $('#ph-temp').value; if (tv3 === '') { pt2.temp = null; pt2.tempSrc = null; } else { var tn2 = Number(tv3); if (!isFinite(tn2) || tn2 < -40 || tn2 > 130) { toast('Temp −40 to 130 °F'); return; } pt2.temp = Math.round(tn2); pt2.tempSrc = a.getAttribute('data-src') === 'ocr' ? 'ocr' : 'typed'; } photoPut(pt2); toast('Temp saved'); render(); return; }
+      case 'ph-ocr': {
+        var po = PI[id]; if (!po || !po.thumb) return; var om = $('#ocr-msg'); a.disabled = true; if (om) om.textContent = 'Reading the ribbon… (first time can take a bit)';
+        var go2 = function () { return window.BLOcr ? Promise.resolve() : new Promise(function (res, rej) { var sc = document.createElement('script'); sc.src = 'ocr.js'; sc.onload = res; sc.onerror = rej; document.head.appendChild(sc); }); };
+        go2().then(function () { return BLOcr.readTemp(po.thumb); }).then(function (r) {
+          a.disabled = false; var m2 = $('#ocr-msg'), inp = $('#ph-temp');
+          if (!r) { if (m2) m2.textContent = 'Couldn’t find a temperature on this photo. Type it in.'; return; }
+          if (inp) inp.value = r.f; var sb = document.querySelector('[data-act="ph-temp"]'); if (sb) sb.setAttribute('data-src', 'ocr');
+          if (m2) m2.innerHTML = 'Looks like <b>' + r.f + '°F</b>' + (r.sure ? ' (°F and °C agree)' : r.fromC ? ' (read from °C)' : '') + '. Check it against the photo, then tap Save.';
+        }).catch(function () { a.disabled = false; var m3 = $('#ocr-msg'); if (m3) m3.textContent = 'The reader couldn’t load. It needs internet the first time. Type the temp instead.'; });
+        return;
+      }
+      case 'ph-dir': { var pd = PI[id]; if (!pd) return; var dv2 = a.getAttribute('data-dir'); pd.dir = pd.dir === dv2 ? null : dv2; photoPut(pd); render(); return; }
+      case 'buck-photo': {
+        var bb = deer(id); if (!bb) return; var mine = P.filter(function (q) { return q.deer.indexOf(id) >= 0 && q.thumb; }).slice(-60).reverse();
+        sheet('<h2>Pick his profile photo</h2><div class="pgrid">' + mine.map(function (q) { return '<a href="javascript:void(0)" data-x="pick" data-pid="' + esc(q.id) + '"><img alt="" src="' + thumbURL(q) + '"></a>'; }).join('') + '</div><div class="btn-row" style="margin-top:10px"><button class="btn ink" data-x="close">Cancel</button></div>', function (x, el, close) {
+          if (x === 'pick') { bb.photo = el.getAttribute('data-pid'); save(); close(); render(); return false; }
+          if (x === 'close') { close(); return false; }
+        });
+        return;
+      }
+      case 'cam-face-save': {
+        var cf = cam(id); if (!cf) return; var rot = $('#cam-rot').checked, fv = $('#cam-face').value;
+        cf.facing = fv === '' ? null : Number(fv); cf.rotating = rot;
+        cf.zones = Array.prototype.map.call(document.querySelectorAll('#cam-zones .zone'), function (z, i) { return { name: clampStr((z.querySelector('.z-name').value || '').trim() || ('View ' + (i + 1)), 30), facing: Number(z.querySelector('.z-face').value) || 0 }; }).slice(0, 8);
+        if (!rot) cf.zones = cf.zones.length && cf.zones.some(function (z) { return z.name !== 'View 1' || z.facing; }) ? cf.zones : [];
+        if (rot && !cf.zones.length) { toast('Add at least one view'); return; }
+        save(); toast('Facing saved'); render(); return;
+      }
+      case 'cam-zone-add': { var wrap = $('#cam-zones'), n4 = wrap.querySelectorAll('.zone').length; if (n4 >= 8) { toast('Up to 8 views'); return; } var row = document.createElement('div'); row.className = 'dt2 zone'; row.innerHTML = '<input type="text" maxlength="30" class="z-name" value="View ' + (n4 + 1) + '"><select class="z-face">' + C8L.map(function (nm, i) { return '<option value="' + (i * 45) + '">' + nm.charAt(0).toUpperCase() + nm.slice(1) + '</option>'; }).join('') + '</select>'; wrap.insertBefore(row, a); return; }
+      case 'bait-add': { var cb = cam(id); if (!cb) return; var bd = $('#bait-day').value; if (!/^\d{4}-\d\d-\d\d$/.test(bd)) { toast('Pick the day'); return; } S.bait.push({ id: uid(), cam: cb.id, day: bd, what: clampStr(($('#bait-what').value || '').trim(), 60) }); save(); toast('Bait logged'); render(); return; }
+      case 'bait-del': S.bait = S.bait.filter(function (b) { return b.id !== id; }); save(); render(); return;
+      case 'pred-lock': {
+        if (!canPredict()) { toast('Prediction limit reached'); return; }
+        var dr2 = predDraft(predForm.who, predForm.days); if (!dr2) return;
+        dr2.cam = $('#pred-cam').value; dr2.from = a.getAttribute('data-from'); dr2.to = a.getAttribute('data-to');
+        var t0 = ($('#pred-m0').value || '').split(':'), t1 = ($('#pred-m1').value || '').split(':');
+        dr2.m0 = (+t0[0]) * 60 + (+t0[1] || 0); dr2.m1 = (+t1[0]) * 60 + (+t1[1] || 0);
+        if (!(dr2.m1 > dr2.m0)) { toast('The end time must be after the start (same day)'); return; }
+        var here2 = visits(dr2.who === 'bucks' ? 'bucks' : 'deer:' + dr2.who, dr2.cam); dr2.n = here2.length; dr2.last = here2[0];
+        dr2.inWin = here2.filter(function (v) { var mm = v.d.getHours() * 60 + v.d.getMinutes(); return mm >= dr2.m0 && mm <= dr2.m1; }).length;
+        makePrediction(dr2).then(function () { toast('Locked in'); render(); }); return;
+      }
+      case 'wx-visits': closeSheet(); fetchWeatherForVisits().then(function () { render(); }); return;
+      case 't3-box': {
+        var ac = Number($('#t3-acres').value); if (!isFinite(ac) || ac < 5 || ac > 5000) { toast('5 to 5,000 acres'); return; }
+        if (!hasLoc()) { toast('Add your property location first'); return; }
+        if (S.settings.lat < 18 || S.settings.lat > 72 || S.settings.lng > -60) { toast('The 3D sim covers the US only'); return; }
+        S.t3 = { box: { lat: S.settings.lat, lng: S.settings.lng, acres: Math.round(ac) }, parking: (S.t3 && S.t3.parking) || [] }; save(); render(); return;
+      }
+      case 't3-dem': a.disabled = true; fetchDem().then(function () { render(); }); return;
+      case 't3-reset': confirmSheet('Change the box?', 'You’ll pick the size again and download the elevation again.', 'Change').then(function (ok) { if (ok) { S.t3 = null; save(); render(); } }); return;
+      case 't3-park': parkSheet(); return;
+      case 't3-wx': {
+        var bx = S.t3 && S.t3.box; if (!bx) return; var dd = t3Day || new Date(), d0 = new Date(dd.getTime() - DAYMS);
+        fetchWeatherFor([ymdOf(d0), ymdOf(dd)], bx.lat, bx.lng).then(function () { if (t3Api) t3Api.refresh(); }); return;
+      }
       case 'install': if (deferredInstall) { deferredInstall.prompt(); deferredInstall = null; } return;
       case 'install-dismiss': S.settings.installDismissed = true; save(); var n = $('#install-note'); if (n) n.remove(); return;
     }
@@ -1369,8 +1922,10 @@
 
   /* ---------------- start ---------------- */
   function boot() {
-    openDB().then(function () { return Promise.all([kvGet('state'), photosAll()]); }).then(function (r) {
+    openDB().then(function () { return Promise.all([kvGet('state'), photosAll(), kvGet('wx').catch(function () { return null; }), kvGet('dem').catch(function () { return null; })]); }).then(function (r) {
       S = migrate(r[0]);
+      WX = (r[2] && typeof r[2] === 'object') ? r[2] : {};
+      if (r[3] && r[3].z && r[3].z.length === 80 * 104 && typeof r[3].key === 'string') DEM = { key: r[3].key, z: Float32Array.from(r[3].z), at: r[3].at };
       var camIds = {}, deerIds = {}; S.cameras.forEach(function (c) { camIds[c.id] = 1; }); S.deer.forEach(function (b) { deerIds[b.id] = 1; });
       P = (r[1] || []).map(function (p) { return cleanPhoto(p, camIds, deerIds); }).filter(Boolean);
       PI = {}; P.forEach(function (p) { PI[p.id] = p; });
@@ -1389,7 +1944,11 @@
   window.BuckLedger = {
     ready: ready, state: function () { return S; }, photos: function () { return P; },
     readExif: readExif, sunTimes: sunTimes, lightOf: function (d) { return lightOf(d); }, visits: function (s, c) { return visits(s || 'any', c); },
-    plainRead: function (s) { return plainRead(visits(s)); }, flush: flush, isPro: function () { return isPro(); }, tier: function () { return tier(); }, sim: function () { return simApi; }
+    plainRead: function (s) { return plainRead(visits(s)); }, flush: flush, isPro: function () { return isPro(); }, tier: function () { return tier(); }, sim: function () { return simApi; },
+    t3: function () { return t3Api; }, sha256: sha256, predStatus: function (id) { var p = S.preds.filter(function (x) { return x.id === id; })[0]; return p ? predStatus(p) : null; },
+    predOk: function (id) { var p = S.preds.filter(function (x) { return x.id === id; })[0]; return p ? predOk(p) : null; }, idSuggest: function (pid) { return idSuggest(PI[pid]); },
+    periodOf: function (d) { return periodOf(d); }, moonInfo: function (d) { return moonInfo(d); }, headingOf: function (pid) { return headingOf(PI[pid]); }, wx: function () { return WX; },
+    dem: function () { return DEM; }, canPredict: function () { return canPredict(); }
   };
   boot();
 })();

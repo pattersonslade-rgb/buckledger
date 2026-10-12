@@ -1,9 +1,11 @@
 /* Buck Ledger settings: the only file you need to edit to launch paid tiers.
  *
  * TIERS (all one-time purchases on Gumroad, no subscription):
- *   Free  : FREE_CAMERA_LIMIT cameras, FREE_BUCK_LIMIT named bucks
- *   Pro   : PRO_CAMERA_LIMIT cameras, PRO_BUCK_LIMIT named bucks           (PRO_PRICE)
- *   Elite : unlimited cameras + bucks, plus the Movement Simulator          (ELITE_PRICE)
+ *   Free  : FREE_CAMERA_LIMIT cameras, FREE_BUCK_LIMIT named bucks, FREE_PRED_LIMIT prediction (+ its scored result)
+ *   Pro   : PRO_CAMERA_LIMIT cameras, PRO_BUCK_LIMIT named bucks, PRO_OPEN_PRED_LIMIT open predictions at a time  (PRO_PRICE)
+ *   Elite : unlimited cameras, bucks + predictions, plus the 2D Movement Simulator and the 3D Terrain Sim     (ELITE_PRICE)
+ *   Every tier: state rut/acorn research, sun + moon per visit, weather per visit, ribbon temp, headings, bait log,
+ *               points + small-buck filter, rename history, profile photo, companions, buck ID suggestions, 3D demo.
  *   Elite Upgrade : Pro owners pay the difference (UPGRADE_PRICE). Its key only unlocks Elite on a phone
  *                   that already holds a valid Pro key; both keys are re-checked with Gumroad.
  *
@@ -18,7 +20,7 @@
  *   *_CHECKOUT_URL instead (leave GUMROAD_PRODUCT_ID empty).
  * After editing: bump VERSION in sw.js and publish.
  *
- * License keys are verified ONCE online with Gumroad, then work offline. Refunded / charged-back /
+ * License keys are verified ONCE online with Gumroad, then keep working on the phone. Refunded / charged-back /
  *   disabled keys are refused, and (when online) re-checked every RECHECK_DAYS.
  * DEV_MODE: keep false in production. When true, the code BUCKLEDGER-TEST unlocks Elite for testing.
  */
@@ -48,6 +50,8 @@ window.BUCKLEDGER_CONFIG = {
   FREE_BUCK_LIMIT: 1,            // confirmed by Slade
   PRO_CAMERA_LIMIT: 3,           // confirmed by Slade
   PRO_BUCK_LIMIT: 3,             // confirmed by Slade
+  FREE_PRED_LIMIT: 1,            // Slade: Free = ONE prediction + ONE scored result
+  PRO_OPEN_PRED_LIMIT: 5,        // DECISION FOR SLADE: Pro = up to 5 open (unscored) predictions at a time; scored ones don't count
 
   DEV_MODE: false,
   DEV_UNLOCK_CODE_SHA256: [

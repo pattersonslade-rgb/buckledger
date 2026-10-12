@@ -1,8 +1,8 @@
-/* Buck Ledger service worker: makes the app work fully offline.
+/* Buck Ledger service worker: caches the app files on the phone.
  * Bump VERSION whenever you publish changes. */
-var VERSION = 'buckledger-v2.0.0';
+var VERSION = 'buckledger-v3.0.0';
 var ASSETS = [
-  './', 'index.html', 'styles.css', 'app.js', 'sim.js', 'config.js', 'manifest.webmanifest', 'privacy.html',
+  './', 'index.html', 'styles.css', 'app.js', 'sim.js', 'terrain.js', 'astro.js', 'wx.js', 'ocr.js', 'data/states.js', 'config.js', 'manifest.webmanifest', 'privacy.html',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png', 'icons/favicon-32.png'
 ];
 self.addEventListener('install', function (e) {
@@ -13,7 +13,7 @@ self.addEventListener('activate', function (e) {
     return Promise.all(keys.filter(function (k) { return k.indexOf('buckledger-') === 0 && k !== VERSION; }).map(function (k) { return caches.delete(k); }));
   }).then(function () { return self.clients.claim(); }));
 });
-// Cache first (instant + offline), then refresh the cached copy in the background.
+// Cache first (instant), then refresh the cached copy in the background.
 self.addEventListener('fetch', function (e) {
   var req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
