@@ -1,7 +1,7 @@
 {
   "name": "Buck Ledger",
   "short_name": "Buck Ledger",
-  "description": "A hunter's logbook that fills itself in from your SD card. No account, no subscription, works offline.",
+  "description": "A hunter's logbook that fills itself in from your SD card. No account, no subscription.",
   "id": "./",
   "start_url": "./",
   "scope": "./",
