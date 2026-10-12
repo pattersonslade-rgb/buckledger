@@ -79,10 +79,14 @@
     }
     return d;
   }
-  // Travel cost: bucks prefer to keep cover when moving between bedding and food (MSU Deer Lab).
-  var COST = { 'B': 1, 'N': 0.8, 'C': 1.1, '.': 2.0, 'F': 2.4, 'W': 6, 'R': 4, 'X': 2.0 };
+  /* Route rule (MSU P3927): bucks "avoid navigating through areas with open understory" and pick routes that keep cover.
+     No study gives a cost per cover type, so routes use RANK ORDER ONLY: first fewest open squares, then fewest
+     mixed squares, then fewest cover squares (lexicographic). The tier sizes below just keep the ranks apart; they are
+     not deer data. No slope cost (none published). */
+  var TIER = { 'B': 0, 'N': 0, 'C': 0, '.': 1, 'X': 1, 'F': 2, 'R': 2, 'W': 2 };   // 0 cover < 1 mixed < 2 open
+  var TIER_STEP = [1, 1e4, 1e8];                                                       // rank separators only
   function costField(cells, pred) {        // Dijkstra with a simple binary heap
-    var d = new Float32Array(N).fill(1e9), heap = [];
+    var d = new Float64Array(N).fill(1e300), heap = [];
     function push(i, v) { heap.push([v, i]); var k = heap.length - 1; while (k > 0) { var p = (k - 1) >> 1; if (heap[p][0] <= heap[k][0]) break; var t = heap[p]; heap[p] = heap[k]; heap[k] = t; k = p; } }
     function pop() { var top = heap[0], last = heap.pop(); if (heap.length) { heap[0] = last; var k = 0; for (;;) { var l = 2 * k + 1, r = l + 1, m = k; if (l < heap.length && heap[l][0] < heap[m][0]) m = l; if (r < heap.length && heap[r][0] < heap[m][0]) m = r; if (m === k) break; var t = heap[m]; heap[m] = heap[k]; heap[k] = t; k = m; } } return top; }
     for (var i = 0; i < N; i++) if (pred(cells[i])) { d[i] = 0; push(i, 0); }
@@ -91,7 +95,7 @@
       var x = i0 % COLS, y = (i0 / COLS) | 0;
       for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
         if (!dx && !dy) continue; var nx = x + dx, ny = y + dy; if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
-        var j = ny * COLS + nx, c = (COST[cells[j]] || 2) * (dx && dy ? 1.414 : 1), nd = d[i0] + c;
+        var j = ny * COLS + nx, nd = d[i0] + TIER_STEP[TIER[cells[j]] == null ? 1 : TIER[cells[j]]];
         if (nd < d[j]) { d[j] = nd; push(j, nd); }
       }
     }
@@ -99,121 +103,103 @@
   }
   function prepare(map) {
     var c = map.cells, has = {}; for (var i = 0; i < N; i++) has[c[i]] = 1;
-    var dB = distField(c, function (z) { return z === 'B'; }), dF = distField(c, function (z) { return z === 'F'; });
-    var dW = distField(c, function (z) { return z === 'W' || z === 'C'; }), dR = distField(c, function (z) { return z === 'R'; });
-    var dN = distField(c, function (z) { return z === 'N'; }), dX = distField(c, function (z) { return z === 'X'; });
-    var dCover = distField(c, function (z) { return z === 'B' || z === 'N' || z === 'C'; });
-    var corr = new Float32Array(N), bed = new Float32Array(N), food = new Float32Array(N), water = new Float32Array(N), roam = new Float32Array(N);
-    var haveRoute = !!(has.B && has.F);
+    var route = new Uint8Array(N), haveRoute = !!(has.B && has.F);
     if (haveRoute) {
-      var cB = costField(c, function (z) { return z === 'B'; }), cF = costField(c, function (z) { return z === 'F'; }), minS = 1e9;
-      for (i = 0; i < N; i++) { var s = cB[i] + cF[i]; if (c[i] !== 'B' && c[i] !== 'F' && s < minS) minS = s; }
-      if (minS > 1e8) minS = 0;
-      for (i = 0; i < N; i++) { var ex = cB[i] + cF[i] - minS; corr[i] = Math.exp(-Math.max(0, ex) / 3.5); if (c[i] === 'N') corr[i] = Math.min(1, corr[i] * 1.8 + 0.15); if (c[i] === 'W') corr[i] *= 0.2; }
+      var cB = costField(c, function (z) { return z === 'B'; }), cF = costField(c, function (z) { return z === 'F'; }), minS = 1e300;
+      for (i = 0; i < N; i++) { var sm = cB[i] + cF[i]; if (c[i] !== 'B' && c[i] !== 'F' && sm < minS) minS = sm; }
+      for (i = 0; i < N; i++) if (c[i] !== 'B' && c[i] !== 'F' && cB[i] + cF[i] <= minS * (1 + 1e-12)) route[i] = 1;   // the best route(s) only, no spread
     }
-    for (i = 0; i < N; i++) {
-      bed[i] = c[i] === 'B' ? 1 : Math.exp(-dB[i] / 1.0) * 0.5;
-      // food: edges next to cover are favored over open interiors (assumption)
-      food[i] = c[i] === 'F' ? (dCover[i] <= 2.5 ? 1 : 0.65) : Math.exp(-dF[i] / 0.8) * 0.35;
-      water[i] = (c[i] === 'W' || c[i] === 'C') ? 0.8 : Math.exp(-dW[i] / 1.2) * 0.6;
-      roam[i] = 0.45 * bed[i] + 0.8 * Math.exp(-dN[i] / 1.2) + 0.35 * corr[i] + 0.25 * Math.exp(-dCover[i] / 2) + (has.X ? 0.25 * Math.exp(-dX[i] / 1.5) : 0);
-    }
-    return { map: map, has: has, dB: dB, dF: dF, dR: dR, dX: dX, corr: corr, bed: bed, food: food, water: water, roam: roam, haveRoute: haveRoute };
+    return { map: map, has: has, route: route, haveRoute: haveRoute };
   }
 
-  /* ---------- the model ---------- */
-  function gauss(x, m, s) { var d = x - m; if (d > 12) d -= 24; if (d < -12) d += 24; return Math.exp(-d * d / (2 * s * s)); }
-  var BASE_DAY = { early: 0.15, prerut: 0.3, rut: 0.6, postrut: 0.2 };   // share of daylight hours spent on the move (relative)
-  var ROAM = { early: 0.0, prerut: 0.25, rut: 0.7, postrut: 0.1 };
-  function weights(cond) {
-    var h = cond.hour, sr = cond.rise, ss = cond.set;
-    var twi = Math.max(gauss(h, sr, 1.0), gauss(h, ss, 1.0));
-    var dayness = clamp(Math.min(h - sr, ss - h) / 2.0, 0, 1);          // ramps over 2 h after sunrise / before sunset
-    var night = (h < sr - 0.5 || h > ss + 0.5) ? 1 : 0;
-    var dayMove = BASE_DAY[cond.season];
-    var t = cond.temp;                                                   // °F vs normal
-    if (t < 0) dayMove += 0.12 * Math.min(1, -t / 15);                   // modest: evidence is weak/inconsistent
-    if (t > 0) dayMove -= 0.12 * Math.min(1, t / 15);
-    if (cond.pressure === 'high') dayMove *= 0.45;                      // nocturnal shift under pressure
-    dayMove = clamp(dayMove, 0.03, 0.85);
-    var w = {
-      bed: dayness * (1 - dayMove) * (1 - 0.75 * twi) * 1.2 + 0.08,
-      travel: twi * (cond.pressure === 'high' ? 0.6 : 1.15) + dayness * dayMove * 0.7,
-      food: night * 0.9 + gauss(h, ss + 0.6, 0.9) * 0.6 + gauss(h, sr - 0.6, 0.9) * 0.35,
-      water: 0.08 + (t > 0 ? 0.25 * Math.min(1, t / 15) : 0),
-      roam: ROAM[cond.season] * (night ? 0.8 : 0.4 + 0.6 * dayMove)
-    };
-    if (cond.pressure === 'high' && !night) w.food *= 0.3;              // food plots used mostly at night under pressure
-    // overall activity this hour (0..1): crepuscular peaks, rut raises daytime + night roaming
-    var act = clamp(0.25 + 0.7 * twi + dayness * dayMove * 0.8 + night * (0.3 + ROAM[cond.season] * 0.3) - (cond.pressure === 'high' && !night ? 0.1 : 0), 0.05, 1);
-    var light = night ? 'night' : (twi > 0.45 ? (h < 12 ? 'dawn' : 'dusk') : 'day');
-    return { w: w, act: act, dayMove: dayMove, light: light, twi: twi };
+  /* ---------- the model: sourced values only ---------- */
+  // Share of buck movement in daylight: about 1/3 in Oct-Nov, over 40% in the rut (MSU Extension 2020; MSU P3927).
+  // Post-rut: no published number, so none is used.
+  var DAY_SHARE = { early: { lo: 0.33, hi: 0.33 }, prerut: { lo: 0.33, hi: 0.33 }, rut: { lo: 0.40, hi: null }, postrut: null };   // rut: "more than 40%" (no upper value published)
+  // Daily distance vs pre-rut (MSU P3927: about 4,800 yd pre-rut, 7,000-7,500+ yd early/peak rut, about 5,000 yd post-rut;
+  // net 24-h distance 1.7x at peak/late rut). Early season: no number published, so none is used.
+  var DIST_RATIO = { early: null, prerut: { lo: 1.0, hi: 1.0 }, rut: { lo: 1.46, hi: 1.56 }, postrut: { lo: 1.04, hi: 1.04 } };   // 7,000 / 4,800, 7,500 / 4,800, 5,000 / 4,800
+  // Hunting pressure: bucks used winter food plots 5x more at night than by day (MSU P3927) -> daytime food x0.2.
+  var FOOD_DAY_UNDER_PRESSURE = 0.2;
+  function lightOf(cond) {   // peaks tied to the sunrise / sunset hour itself (no peak width is published)
+    var h = cond.hour;
+    if (Math.abs(h - cond.rise) <= 0.5) return 'dawn';
+    if (Math.abs(h - cond.set) <= 0.5) return 'dusk';
+    return h > cond.rise && h < cond.set ? 'day' : 'night';
   }
+  // Which deer areas are active (MSU P3927, direction only): night = food + routes; sunrise/sunset hour = bedding, routes and
+  // food ("flurry of activity", food-plot entries peak around sunset); daylight = bedding (bedded most by day) + routes
+  // ("bucks move every day, and they move during daylight hours").
+  var ACTIVE = { night: { F: 1, R: 1 }, dawn: { B: 1, F: 1, R: 1 }, dusk: { B: 1, F: 1, R: 1 }, day: { B: 1, R: 1 } };
+  function weights(cond) {
+    var light = lightOf(cond);
+    return { light: light, active: ACTIVE[light], dayShare: DAY_SHARE[cond.season], ratio: DIST_RATIO[cond.season], act: 1 };
+  }
+  function kindOf(P, i) { var z = P.map.cells[i]; return z === 'B' ? 'B' : z === 'F' ? 'F' : P.route[i] ? 'R' : ''; }
   function heat(P, cond) {
-    var W = weights(cond), w = W.w, c = P.map.cells, H = new Float32Array(N), mx = 0, i;
-    var standNear = new Float32Array(N);
-    if (cond.pressure === 'high' && W.light !== 'night') P.map.stands.forEach(function (s) { for (i = 0; i < N; i++) { var dx = (i % COLS) - s.x, dy = ((i / COLS) | 0) - s.y; standNear[i] = Math.max(standNear[i], Math.exp(-(dx * dx + dy * dy) / 6)); } });
+    // DISPLAY ONLY: the shading levels and blur below are a color scale, not deer data. Ratings never read them.
+    var SHOW_ACTIVE = 0.6, SHOW_QUIET = 0.2;   // display only
+    var W = weights(cond), H = new Float32Array(N), c = P.map.cells, i, mx = 0;
+    var avoid = cond.pressure === 'high' && W.light !== 'night';
     for (i = 0; i < N; i++) {
-      var v = w.bed * P.bed[i] + w.travel * P.corr[i] + w.food * P.food[i] + w.water * P.water[i] + w.roam * P.roam[i];
-      if (c[i] === 'R') v *= 0.35;
-      if (cond.pressure === 'high' && W.light !== 'night') { v *= 1 - 0.65 * Math.exp(-P.dR[i] / 2); v *= 1 - 0.5 * standNear[i]; if (c[i] === 'B') v *= 1.25; }
-      H[i] = v; if (v > mx) mx = v;
+      var k = kindOf(P, i); if (!k) continue;
+      var v = W.active[k] ? SHOW_ACTIVE : SHOW_QUIET;
+      if ((k === 'R') && W.ratio) v *= (W.ratio.lo + W.ratio.hi) / 2;                 // more daily travel in the rut (sourced ratio)
+      if (k === 'F' && avoid) v *= FOOD_DAY_UNDER_PRESSURE;                            // sourced
+      if (k === 'B' && avoid) v = 1;   // DISPLAY ONLY: thick cover drawn darker by day under pressure (direction from MSU P3927 / Stewart 2022; no size)
+      H[i] = v;
     }
-    if (mx > 0) for (i = 0; i < N; i++) H[i] /= mx;
-    return { H: H, W: W };
+    if (avoid) {   // bucks avoid hunted places by day (MSU P3927, Henderson 2023): on/off, no size or radius published
+      for (i = 0; i < N; i++) if (c[i] === 'R') H[i] = 0;
+      P.map.stands.forEach(function (s) { H[s.y * COLS + s.x] = 0; });
+    }
+    var B = new Float32Array(N);   // display-only blur
+    for (i = 0; i < N; i++) { var x = i % COLS, y = (i / COLS) | 0, sm = 0, n = 0; for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) { var X = x + dx, Y = y + dy; if (X < 0 || Y < 0 || X >= COLS || Y >= ROWS) continue; sm += H[Y * COLS + X] * (dx || dy ? 0.5 : 1); n += dx || dy ? 0.5 : 1; } B[i] = Math.max(H[i], sm / n); if (B[i] > mx) mx = B[i]; }
+    if (mx > 0) for (i = 0; i < N; i++) B[i] /= mx;
+    return { H: B, W: W };
   }
   var WIND_VEC = { N: [0, 1], NE: [-0.707, 0.707], E: [-1, 0], SE: [-0.707, -0.707], S: [0, -1], SW: [0.707, -0.707], W: [1, 0], NW: [0.707, 0.707] }; // direction scent travels (wind FROM N blows south = +y)
-  // Stand colors, no distance (same rule as the 3D sim): follow your air from the stand downwind until it leaves the
-  // property; it fans +/- 22.5 deg, the width of one of the 8 wind directions you can pick. Red = it crosses bedding, the
-  // likely route or food where deer likely are this hour; yellow = it crosses only deer areas that are likely quiet now,
-  // or it's within 45 min of sunrise/sunset when air can flip; green = it crosses no deer area on the property.
-  // Which areas are active by time of day matches the 3D sim: night = food + routes; dawn/dusk = bedding + routes + food; midday = bedding.
-  function routeCells(P) {
-    var on = new Uint8Array(N); if (!P.haveRoute) return on;
-    for (var i = 0; i < N; i++) if (P.corr[i] >= 0.999 && P.map.cells[i] !== 'B' && P.map.cells[i] !== 'F') on[i] = 1;   // the least-cost bed-to-food path itself
-    return on;
-  }
+  // Stand colors, no distance (same rule as the 3D sim): follow your air downwind from the stand until it leaves the
+  // property; it fans +/- 22.5 deg, the width of one of the 8 wind choices. Red = it crosses an active deer area this hour;
+  // yellow = it crosses only quiet deer areas, or it's the hour after sunrise when slope air is still turning over
+  // (Farina et al. 2023: 45-60 min in fall); green = it crosses no deer area. (NDA: keep scent from blowing toward deer.)
   function standsEval(P, R, cond) {
-    var v = WIND_VEC[cond.wind] || [0, 1], c = P.map.cells, on = routeCells(P), light = R.W.light, h = cond.hour;
-    var flip = Math.abs(h - cond.rise) < 0.75 || Math.abs(h - cond.set) < 0.75;
-    var act = light === 'night' ? { F: 1, R: 1 } : light === 'day' ? { B: 1 } : { B: 1, F: 1, R: 1 };
+    var v = WIND_VEC[cond.wind] || [0, 1], act = R.W.active, h = cond.hour;
+    var flip = h >= cond.rise && h <= cond.rise + 1;
     return P.map.stands.map(function (s, k) {
-      var odds = 0, n = 0, now = 0, quiet = 0, hitBed = false, hitRoute = false;
-      for (var dy = -2; dy <= 2; dy++) for (var dx = -2; dx <= 2; dx++) { var x = s.x + dx, y = s.y + dy; if (x < 0 || y < 0 || x >= COLS || y >= ROWS) continue; odds += R.H[y * COLS + x]; n++; }
-      odds = (odds / n) * R.W.act;
+      var now = 0, quiet = 0, hitBed = false, hitRoute = false;
       for (var i = 0; i < N; i++) {
         var ddx = (i % COLS) - s.x, ddy = ((i / COLS) | 0) - s.y, d = Math.sqrt(ddx * ddx + ddy * ddy);
         if (d < 0.5) continue;
         if ((ddx * v[0] + ddy * v[1]) / d < 0.9239) continue;            // cos 22.5 deg: inside the downwind fan, any distance
-        var kind = c[i] === 'B' ? 'B' : c[i] === 'F' ? 'F' : on[i] ? 'R' : '';
-        if (!kind) continue;
+        var kind = kindOf(P, i); if (!kind) continue;
         if (act[kind]) { now++; if (kind === 'B') hitBed = true; if (kind === 'R') hitRoute = true; } else quiet++;
       }
       var color = now ? 'red' : (quiet || flip) ? 'yellow' : 'green';
-      return { i: k, name: s.name, x: s.x, y: s.y, odds: odds, riskBed: hitBed, riskRoute: hitRoute, quiet: quiet, flip: flip && !now, color: color };
+      return { i: k, name: s.name, x: s.x, y: s.y, riskBed: hitBed, riskRoute: hitRoute, quiet: quiet, flip: flip && !now, color: color };
     });
   }
   function fmtHour(h) { var hh = Math.floor(h) % 24, mm = Math.round((h - Math.floor(h)) * 60); if (mm === 60) { hh = (hh + 1) % 24; mm = 0; } return ((hh % 12) || 12) + ':' + (mm < 10 ? '0' : '') + mm + ' ' + (hh < 12 ? 'AM' : 'PM'); }
   var WIND_NAME = { N: 'north', NE: 'northeast', E: 'east', SE: 'southeast', S: 'south', SW: 'southwest', W: 'west', NW: 'northwest' };
   var TOWARD = { N: 'south', NE: 'southwest', E: 'west', SE: 'northwest', S: 'north', SW: 'northeast', W: 'east', NW: 'southeast' };
   function why(P, R, cond, stands) {
-    var W = R.W, out = [], t = cond.temp;
-    var tag = function (s) { return ' <span class="bs-src">' + s + '</span>'; };
-    if (W.light === 'dawn' || W.light === 'dusk') out.push('<b>' + (W.light === 'dawn' ? 'Dawn' : 'Dusk') + ' is prime time.</b> Collared deer move most around sunrise and sunset, so the model puts weight on the routes between bedding and food.' + tag('GPS-collar research'));
-    else if (W.light === 'day') out.push('<b>Midday:</b> adult bucks spend most daylight hours bedded, so heat sits on bedding cover.' + (W.dayMove > 0.4 ? ' This season and setup add more daytime movement than usual.' : '') + tag('GPS-collar research'));
-    else out.push('<b>Night:</b> bucks feed and travel more at night, so food sources light up.' + tag('GPS-collar research'));
-    if (W.light === 'dusk' && cond.pressure !== 'high') out.push('Bucks enter food plots mostly right around sunset and after dark. A stand on the travel route short of the food gives the best daylight odds.' + tag('MSU Deer Lab'));
-    if (cond.season === 'early') out.push('<b>Early season:</b> patterns are the most predictable: bed → food → bed.' + tag('model simplification'));
-    if (cond.season === 'prerut') out.push('<b>Pre-rut:</b> bucks start covering more ground each day (scraping, checking does), so funnels and cover edges pick up.' + tag('GPS-collar research'));
-    if (cond.season === 'rut') out.push('<b>Rut:</b> in collar studies, adult bucks travel the most each day of the year and spend less time bedded. Some make short trips outside their usual range, often partly in daylight. Heat spreads across funnels, cover edges and property lines.' + tag('GPS-collar research'));
-    if (cond.season === 'postrut') out.push('<b>Post-rut:</b> bucks rest and feed to recover, so movement settles back toward food and bedding.' + tag('GPS-collar research'));
-    if (t <= -8) out.push('<b>Cold snap (' + t + '°F vs normal):</b> the model adds a little daytime movement. Be aware: research on cold fronts is mixed. Temperature matters more than other weather in some studies, but a Penn State look at a big front found no clear change.' + tag('weak evidence'));
-    else if (t < 0) out.push('Slightly cooler than normal: a small bump to daytime movement in the model.' + tag('weak evidence'));
-    if (t >= 8) out.push('<b>Hot (' + '+' + t + '°F vs normal):</b> the model trims daytime movement and adds a pull toward water. That fits some findings but is mostly a model assumption.' + tag('assumption'));
-    if (cond.pressure === 'high') out.push('<b>High pressure:</b> hunted deer shift movement into the dark, avoid roads and hunted spots, and hold tighter in thick cover. Daytime food-plot use drops; night use stays.' + tag('GPS-collar research'));
-    if (!P.haveRoute) out.push('<b>Add bedding cover and a food source</b> in Edit map to see travel routes between them.' + tag('model note'));
+    var W = R.W, out = [], tag = function (t) { return ' <span class="bs-src">' + t + '</span>'; };
+    var pct = function (r) { return r.hi == null ? 'over ' + Math.round(r.lo * 100) + '%' : 'about a third'; };
+    out.push('Most movement comes around dawn and dusk; bucks bed most at midday.' + tag('MSU Deer Lab'));
+    if (W.light === 'dawn' || W.light === 'dusk') out.push('<b>' + (W.light === 'dawn' ? 'Sunrise' : 'Sunset') + ' hour:</b> collared bucks show a flurry of activity at dawn and dusk' + (W.light === 'dusk' ? ', and they enter food plots most right around sunset' : '') + '. Bedding, the route and food are all shown as active. Research gives no width for this peak, so only the sunrise and sunset hours are marked.' + tag('MSU Deer Lab'));
+    else if (W.light === 'day') out.push('<b>Daylight:</b> bucks are bedded most by day, but they move every day in daylight too. Bedding and the route are shown as active.' + (W.dayShare ? ' About ' + pct(W.dayShare) + ' of buck movement happens in daylight in this phase.' : ' Research doesn\u2019t give a daylight share for the post-rut.') + tag('MSU Deer Lab'));
+    else out.push('<b>Night:</b> most buck movement happens at night, so food and the route are shown as active.' + tag('MSU Deer Lab'));
+    if (cond.season === 'early') out.push('<b>Early season:</b> about a third of movement in daylight (Oct-Nov). No early-season daily-distance number is published, so travel is not scaled.' + tag('MSU Deer Lab'));
+    if (cond.season === 'prerut') out.push('<b>Pre-rut:</b> bucks travel about 4,800 yards (2.7 mi) a day. This is the baseline for the other phases.' + tag('MSU Deer Lab'));
+    if (cond.season === 'rut') out.push('<b>Rut:</b> bucks travel about 1.5x farther each day (7,000-7,500+ yards vs 4,800 pre-rut), and where they end each day is 1.7x farther from where they started. Over 40% of movement is in daylight. The route is drawn stronger to match.' + tag('MSU Deer Lab'));
+    if (cond.season === 'postrut') out.push('<b>Post-rut:</b> daily travel drops back to about 5,000 yards, close to pre-rut. Research doesn\u2019t give a post-rut daylight share, so none is used.' + tag('MSU Deer Lab'));
+    if (cond.pressure === 'high') out.push('<b>High pressure:</b> Pressured bucks shift into thick cover by day and avoid hunted spots and open food in daylight; they don\u2019t simply move less. In one Oklahoma study, daytime use of cover rose 240% and hunters saw 62% fewer collared bucks by the second gun weekend. The map shades thick cover darker by day and shows roads, your stand spots and open food as avoided (no study gives how far).' + tag('MSU P3927, Henderson 2023, Stewart 2022'));
+    if (cond.temp) out.push('<b>' + (cond.temp < 0 ? 'Colder' : 'Warmer') + ' than normal:</b> Temperature swings may nudge movement, but in the South studies found the effect small and inconsistent. The map does not change for temperature.' + tag('Webb 2010, Goethlich 2020'));
+    if (!P.haveRoute) out.push('<b>Add bedding cover and a food source</b> in Edit map to see the route between them.' + tag('model note'));
+    else out.push('The route keeps to cover where it can: bucks avoid open understory when moving (no study gives a cost per cover type, so only that order is used).' + tag('MSU Deer Lab'));
     var reds = stands.filter(function (s) { return s.color === 'red'; });
     if (P.map.stands.length) out.push('<b>Wind from the ' + WIND_NAME[cond.wind] + '</b> carries your scent ' + TOWARD[cond.wind] + '. ' + (reds.length ? reds.map(function (s) { return esc(s.name); }).join(', ') + (reds.length > 1 ? ' are' : ' is') + ' red: your air blows over ' + (reds.some(function (s) { return s.riskBed; }) ? 'bedding cover' : 'a deer area') + ' where deer likely are now.' : 'No stand\u2019s air blows over a deer area where deer likely are now.') + ' Stands are rated by whether your air crosses bedding, the route or food anywhere on the property, not by any smell distance. Wind changes which stand to hunt; in this model it does not move the deer.' + tag('NDA: keep scent off deer'));
+    if (cond.hour >= cond.rise && cond.hour <= cond.rise + 1) out.push('<b>First hour after sunrise:</b> slope air is turning over from downhill to uphill (45-60 min in fall in one field study), so stands are yellow at best. No study for the evening turnover was found, so none is used.' + tag('Farina et al. 2023'));
     return out;
   }
   function simulate(map, cond) { var P = prepare(map), R = heat(P, cond), st = standsEval(P, R, cond); return { P: P, R: R, stands: st, why: why(P, R, cond, st) }; }
@@ -261,10 +247,10 @@
     function legend() {
       var el = root.querySelector('#bs-legend'); if (!el) return;
       el.innerHTML = ZKEYS.filter(function (k) { return k !== '.'; }).map(function (k) { return '<span><i style="background:' + ZONES[k].color + '"></i>' + ZONES[k].name + '</span>'; }).join('') +
-        (mode === 'sim' ? '<span><i style="background:rgba(214,40,20,.75)"></i>Higher odds</span>' : '');
+        (mode === 'sim' ? '<span><i style="background:rgba(214,40,20,.75)"></i>Active deer areas this hour</span>' : '');
     }
+    function tempLabel(t) { return t === 0 ? 'Normal' : (t > 0 ? '+' : '\u2212') + Math.abs(t) + '\u00b0F' + (t <= -10 ? ' \u00b7 cold front' : t >= 10 ? ' \u00b7 heat' : ''); }
     function seg(name, items, cur, cols) { return '<div class="bs-seg" style="grid-template-columns:repeat(' + cols + ',1fr)">' + items.map(function (it) { return '<button data-bs="' + name + ':' + it[0] + '" class="' + (it[0] === cur ? 'on' : '') + '">' + it[1] + '</button>'; }).join('') + '</div>'; }
-    function tempLabel(t) { return t === 0 ? 'Normal' : (t > 0 ? '+' : '−') + Math.abs(t) + '°F' + (t <= -10 ? ' · cold front' : t >= 10 ? ' · heat' : ''); }
     function side() {
       var el = root.querySelector('#bs-side'); if (!el) return;
       if (mode === 'edit') { el.innerHTML = editPanel(); bindEdit(); return; }
@@ -280,10 +266,10 @@
         '<div class="bs-row" style="margin:0"><div class="bs-lab"><span>Show</span></div>' + seg('layer', [['heat', (layers.heat ? '✓ ' : '') + 'Heat map'], ['trails', (layers.trails ? '✓ ' : '') + 'Buck trails']].concat(host.visitCount ? [['visits', (layers.visits ? '✓ ' : '') + 'My cam visits']] : []), '', host.visitCount ? 3 : 2) + '</div></div>' +
         '<div class="bs-card" id="bs-stands"><h3>Stands right now</h3>' + (result.stands.length ? result.stands.map(function (s) {
           return '<div class="bs-stand" data-stand="' + s.i + '"><span class="bs-dot c-' + s.color + '"></span><span style="flex:1"><b>' + esc(s.name) + '</b><br><span style="font-size:12.5px;color:#6b6553">' +
-            (s.color === 'red' ? 'Bad wind: your air blows over ' + (s.riskBed ? 'bedding' : s.riskRoute ? 'the deer route' : 'the food') : s.color === 'green' ? 'Good wind: your air misses deer areas' : s.flip ? 'Air can flip near sunrise/sunset' : 'Air crosses deer areas that are likely quiet now') + '</span></span><span style="font-size:12px;font-weight:700">' + Math.round(s.odds * 100) + '</span></div>';
-        }).join('') + '<p class="bs-note">Number = relative odds score (0–100) from the model for this hour, not a percent chance.</p>' : '<p class="bs-note">No stands yet. Add them in Edit map.</p>') + '</div>' +
+            (s.color === 'red' ? 'Bad wind: your air blows over ' + (s.riskBed ? 'bedding' : s.riskRoute ? 'the deer route' : 'the food') : s.color === 'green' ? 'Good wind: your air misses deer areas' : s.flip ? 'Air can flip near sunrise/sunset' : 'Air crosses deer areas that are likely quiet now') + '</span></span></div>';
+        }).join('') + '<p class="bs-note">Color comes only from where your air goes. No odds number: no study supports one.</p>' : '<p class="bs-note">No stands yet. Add them in Edit map.</p>') + '</div>' +
         '<div class="bs-card" id="bs-whycard"><h3>Why the map looks like this</h3><ul class="bs-why" id="bs-why">' + result.why.map(function (l) { return '<li>' + l + '</li>'; }).join('') + '</ul>' +
-        '<p class="bs-note"><b>This is a simple model, not a forecast.</b> It blends published averages from GPS-collar studies of whitetails with labeled assumptions. Real bucks on your land will differ. Use it to think through setups, and trust your own camera data first.</p></div>';
+        '<p class="bs-note"><b>This is a simple model, not a forecast.</b> It uses only published numbers from GPS-collar studies of whitetails; the shading is a color scale, not data. Real bucks on your land will differ. Use it to think through setups, and trust your own camera data first.</p></div>';
       bindSim();
     }
     function editPanel() {
@@ -303,8 +289,8 @@
     function scaleText() { var sq = map.acres / N, side = Math.sqrt(map.acres * 43560 / N); return 'each square ≈ ' + (sq < 1 ? sq.toFixed(2) : sq.toFixed(1)) + ' ac (' + Math.round(side) + ' ft)'; }
     function bindSim() {
       var hr = root.querySelector('#bs-hour'), tp = root.querySelector('#bs-temp');
-      hr.addEventListener('input', function () { cond.hour = Number(hr.value); refresh(); });
       tp.addEventListener('input', function () { cond.temp = Number(tp.value); root.querySelector('#bs-temp-lab').textContent = tempLabel(cond.temp); refresh(); });
+      hr.addEventListener('input', function () { cond.hour = Number(hr.value); refresh(); });
     }
     function refresh() {    // light update without rebuilding sliders (keeps the thumb under your finger)
       recompute(); var W = result.R.W;
@@ -313,8 +299,8 @@
       if (wy) wy.innerHTML = result.why.map(function (l) { return '<li>' + l + '</li>'; }).join('');
       if (sd) sd.innerHTML = '<h3>Stands right now</h3>' + (result.stands.length ? result.stands.map(function (s) {
         return '<div class="bs-stand" data-stand="' + s.i + '"><span class="bs-dot c-' + s.color + '"></span><span style="flex:1"><b>' + esc(s.name) + '</b><br><span style="font-size:12.5px;color:#6b6553">' +
-          (s.color === 'red' ? 'Bad wind: your air blows over ' + (s.riskBed ? 'bedding' : s.riskRoute ? 'the deer route' : 'the food') : s.color === 'green' ? 'Good wind: your air misses deer areas' : s.flip ? 'Air can flip near sunrise/sunset' : 'Air crosses deer areas that are likely quiet now') + '</span></span><span style="font-size:12px;font-weight:700">' + Math.round(s.odds * 100) + '</span></div>';
-      }).join('') + '<p class="bs-note">Number = relative odds score (0–100) from the model for this hour, not a percent chance.</p>' : '<p class="bs-note">No stands yet. Add them in Edit map.</p>');
+          (s.color === 'red' ? 'Bad wind: your air blows over ' + (s.riskBed ? 'bedding' : s.riskRoute ? 'the deer route' : 'the food') : s.color === 'green' ? 'Good wind: your air misses deer areas' : s.flip ? 'Air can flip near sunrise/sunset' : 'Air crosses deer areas that are likely quiet now') + '</span></span></div>';
+      }).join('') + '<p class="bs-note">Color comes only from where your air goes. No odds number: no study supports one.</p>' : '<p class="bs-note">No stands yet. Add them in Edit map.</p>');
       draw();
     }
     function bindEdit() {
@@ -353,7 +339,7 @@
       ctx.fillStyle = 'rgba(29,29,23,.8)'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('N ↑', W2 - 18, 12);
       if (mode === 'sim') { var v = WIND_VEC[cond.wind]; ctx.save(); ctx.translate(22, 22); ctx.fillStyle = 'rgba(255,250,240,.9)'; ctx.beginPath(); ctx.arc(0, 0, 17, 0, 6.283); ctx.fill(); ctx.rotate(Math.atan2(v[1], v[0])); ctx.strokeStyle = '#1d4e89'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-11, 0); ctx.lineTo(10, 0); ctx.lineTo(4, -5); ctx.moveTo(10, 0); ctx.lineTo(4, 5); ctx.stroke(); ctx.restore(); }
     }
-    /* buck dots: sample likely cells from the heat map and walk there along higher-odds cells */
+    /* buck dots (DISPLAY ONLY): wander between the shaded deer areas; not a prediction */
     function pickTarget() {
       var H = result.R.H, tot = 0, i; for (i = 0; i < N; i++) tot += H[i] * H[i] * H[i];
       var r = Math.random() * tot; for (i = 0; i < N; i++) { r -= H[i] * H[i] * H[i]; if (r <= 0) break; }
@@ -432,7 +418,7 @@
     recompute(); initAgents(); raf = requestAnimationFrame(loop);
     var api = {
       destroy: destroy, getMap: function () { return JSON.parse(JSON.stringify(map)); },
-      state: function () { return { cond: JSON.parse(JSON.stringify(cond)), mode: mode, tool: tool, stands: result ? result.stands.map(function (s) { return { name: s.name, color: s.color, odds: s.odds }; }) : [], heatSum: result ? Array.prototype.reduce.call(result.R.H, function (a, b) { return a + b; }, 0) : 0, heat: result ? Array.prototype.slice.call(result.R.H) : [], why: result ? result.why.slice() : [], act: result ? result.R.W.act : 0, agents: agents.length }; },
+      state: function () { return { cond: JSON.parse(JSON.stringify(cond)), mode: mode, tool: tool, stands: result ? result.stands.map(function (s) { return { name: s.name, color: s.color }; }) : [], heatSum: result ? Array.prototype.reduce.call(result.R.H, function (a, b) { return a + b; }, 0) : 0, heat: result ? Array.prototype.slice.call(result.R.H) : [], why: result ? result.why.slice() : [], act: result ? result.R.W.act : 0, agents: agents.length }; },
       set: function (o) { Object.keys(o || {}).forEach(function (k) { if (k in cond) cond[k] = o[k]; }); if (mode === 'sim') side(); draw(); }
     };
     root.__bsim = api;

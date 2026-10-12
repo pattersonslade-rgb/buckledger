@@ -125,18 +125,15 @@
   var WAF = { 'B': 0.1, 'N': 0.2, 'C': 0.2, '.': 0.3, 'X': 0.3, 'F': 0.4, 'W': 0.4, 'R': 0.4 };
   function underCover(u10, zone) { return u10 / 1.15 * (WAF[zone] == null ? 0.3 : WAF[zone]); }
 
-  /* Slope (thermal) air speed. PUBLISHED: bulk downslope (katabatic) flow ~1 m/s (2.2 mph) on slopes a few hundred meters
-     long and 2-3 m/s (4.5-6.7 mph) on slopes 1 km (0.6 mi) or longer (Haiden & Whiteman 2005, J. Appl. Meteor. 44, citing
-     Mahrt 1982 and Doran et al. 1990), seen there on a slope of only 1.6 degrees (2.8% grade). Upslope (anabatic) flow is
-     usually 1-2 m/s (2.2-4.5 mph) (Royal Meteorological Society). ESTIMATES: the straight-line blend by slope length,
-     scaling the upslope speed with sun height, full strength from a 2.8% grade up (fading to zero on flat ground),
-     and 0.3 m/s (0.7 mph) when the air is switching. */
+  /* Slope (thermal) air speed, PUBLISHED values only. Downslope (night): about 1 m/s (2.2 mph) on slopes a few hundred
+     meters long, 2-3 m/s (4.5-6.7 mph) on slopes 1 km (0.6 mi) or longer (Haiden & Whiteman 2005). Shorter than 1 km uses the
+     short-slope value; 1 km+ uses the middle of 2-3. Upslope (day): usually 1-2 m/s (2.2-4.5 mph) (Royal Meteorological
+     Society); the middle, 1.5, is used. While the air turns over after sunrise, no slope speed is used (direction unsettled). */
   function slopeFlow(mode, sunEl, runM) {
-    if (mode === 'down') return 1 + 1.5 * clamp((runM - 300) / 700, 0, 1);
-    if (mode === 'up') return 1 + clamp((sunEl - 8) / 37, 0, 1);
-    return 0.3;
+    if (mode === 'down') return runM >= 1000 ? 2.5 : 1;
+    if (mode === 'up') return 1.5;
+    return 0;
   }
-  var FULL_GRADE = 0.028;
 
   /* ---------- terrain fields ---------- */
   function fields(z, wm, hm) {
@@ -146,7 +143,7 @@
       gx[i] = (z[y * NX + xr] - z[y * NX + xl]) / ((xr - xl) * dx); gy[i] = (z[yd * NX + x] - z[yu * NX + x]) / ((yd - yu) * dy);
       sl[i] = Math.sqrt(gx[i] * gx[i] + gy[i] * gy[i]); if (z[i] < mn) mn = z[i]; if (z[i] > mx) mx = z[i];
     }
-    // low spots: below the mean of a 5x5 neighbourhood (where cold air pools)
+    // DISPLAY ONLY: low spots, below the mean of the neighbourhood, used to tint cold-air pooling (not in ratings)
     var low = new Float32Array(NX * NY);
     for (y = 0; y < NY; y++) for (x = 0; x < NX; x++) {
       var s = 0, c = 0; for (var oy = -3; oy <= 3; oy++) for (var ox = -3; ox <= 3; ox++) { var X = x + ox, Y = y + oy; if (X >= 0 && Y >= 0 && X < NX && Y < NY) { s += z[Y * NX + X]; c++; } }
@@ -162,15 +159,19 @@
     var u10 = (air.ws || 0) * 0.44704, el = sunElev(date, lat, lng), t = date.getTime();
     var nightish = rise && set ? (t < rise.getTime() + 36e5 || t > set.getTime() - 36e5) : el < 10;
     var cls = stability(u10, el, air.cc == null ? 30 : air.cc, nightish);
-    var mode = el > 8 && !nightish ? 'up' : (el < -1 || cls >= 5) ? 'down' : 'mixed';
-    if (rise && set && (Math.abs(t - rise.getTime()) < 45 * 6e4 || Math.abs(t - set.getTime()) < 45 * 6e4)) mode = 'mixed';
+    // Downslope at night, upslope by day (RMetS: the flow reverses after sunset). Morning turnover: from sunrise to +60 min
+    // (Farina et al. 2023: starts within 30 min of sunrise, lasts 45-60 min in fall; Nadeau et al. 2020). No evening study
+    // was verified, so there is no evening window: air switches to downslope at sunset.
+    var mode;
+    if (rise && set) mode = t < rise.getTime() || t >= set.getTime() ? 'down' : t < rise.getTime() + 60 * 6e4 ? 'mixed' : 'up';
+    else mode = el > 0 ? 'up' : 'down';
     var to = (air.wd + 180) * D2R;
     return { u10: u10, el: el, cls: cls, mode: mode, tx: Math.sin(to), ty: -Math.cos(to), calm: u10 < 1.0 };
   }
   function flowAt(F, A, i) {
     // m/s: open wind slowed by cover (published WAF) plus slope air (published speeds), see notes above
     var uw = underCover(A.u10, F.zone ? F.zone[i] : '.'), th = slopeFlow(A.mode, A.el, F.run || 300);
-    var sf = clamp(F.sl[i] / FULL_GRADE, 0, 1), dir = A.mode === 'up' ? 1 : -1;
+    var sf = F.sl[i] > 1e-4 ? 1 : 0, dir = A.mode === 'up' ? 1 : -1;   // any real tilt (the guard only skips flat cells)
     var gx = F.gx[i], gy = F.gy[i], gl = F.sl[i] || 1;
     var vx = uw * A.tx + th * sf * dir * gx / gl, vy = uw * A.ty + th * sf * dir * gy / gl;
     return [vx, vy];
@@ -203,15 +204,17 @@
   }
 
   /* ---------- deer: where they likely are this hour ---------- */
+  // Time of day (MSU P3927, direction only): the sunrise hour and sunset hour are the activity peaks (no peak width is
+  // published, so only those hours count); daylight between; night outside. Without sun times: clock hour 6 / 18 as stand-ins.
   function phase(date, rise, set) {
-    if (!rise || !set) { var h = date.getHours(); return h < 5 || h >= 21 ? 'night' : h < 9 ? 'morning' : h < 15 ? 'midday' : 'evening'; }
-    var t = date.getTime(), r = rise.getTime(), s = set.getTime();
-    if (t < r - 90 * 6e4 || t > s + 90 * 6e4) return 'night';
-    if (t < r + 150 * 6e4) return 'morning';
-    if (t > s - 180 * 6e4) return 'evening';
-    return 'midday';
+    var t = date.getTime(), r = rise ? rise.getTime() : new Date(date).setHours(6, 0, 0, 0), s = set ? set.getTime() : new Date(date).setHours(18, 0, 0, 0), H = 30 * 6e4;
+    if (Math.abs(t - r) <= H) return 'morning';
+    if (Math.abs(t - s) <= H) return 'evening';
+    return t > r && t < s ? 'midday' : 'night';
   }
-  var WEIGHT = { night: { B: 0.3, F: 1, R: 0.6 }, morning: { B: 1, F: 0.6, R: 1 }, midday: { B: 1, F: 0.2, R: 0.4 }, evening: { B: 0.8, F: 0.9, R: 1 } };
+  // Active deer areas by phase (MSU P3927, direction only): night = food + routes; sunrise / sunset hour = bedding, routes,
+  // food; daylight = bedding + routes (bedded most by day; "bucks move every day, and they move during daylight hours").
+  var ACTIVE = { night: { F: 1, R: 1 }, morning: { B: 1, F: 1, R: 1 }, midday: { B: 1, R: 1 }, evening: { B: 1, F: 1, R: 1 } };
   function comps(map, ch) {   // connected groups of one zone on the 2D map (in map cells)
     var seen = {}, out = [];
     for (var i = 0; i < COLS * ROWS; i++) {
@@ -240,12 +243,10 @@
   }
   function centreOf(cells) { var sx = 0, sy = 0; cells.forEach(function (j) { sx += j % COLS; sy += (j / COLS) | 0; }); return [Math.round((sx / cells.length + 0.5) * K), Math.round((sy / cells.length + 0.5) * K)]; }
   function routes(map, F) {
-    // deer cost: steep slopes cost more; funnels and creek bottoms are easy; roads and neighbor lines are avoided
-    var cost = new Float32Array(NX * NY);
-    for (var i = 0; i < NX * NY; i++) {
-      var z = zoneAt(map, i % NX, (i / NX) | 0);
-      cost[i] = 1 + 8 * Math.min(F.sl[i], 0.6) + (z === 'R' ? 6 : z === 'X' ? 4 : z === 'N' ? -0.5 : z === 'C' ? 0.5 : z === 'F' ? 0.6 : 0);
-    }
+    // Rank order only (MSU P3927: bucks avoid open understory and keep to cover): fewest open cells first, then fewest
+    // mixed cells, then fewest cover cells. The tier sizes only keep ranks apart; they are not deer data. No slope cost.
+    var cost = new Float64Array(NX * NY), TIER = { 'B': 0, 'N': 0, 'C': 0, '.': 1, 'X': 1, 'F': 2, 'R': 2, 'W': 2 }, STEP = [1, 1e5, 1e10];
+    for (var i = 0; i < NX * NY; i++) { var z = zoneAt(map, i % NX, (i / NX) | 0); cost[i] = STEP[TIER[z] == null ? 1 : TIER[z]]; }
     var beds = comps(map, 'B'), foods = comps(map, 'F'), out = [];
     if (!beds.length || !foods.length) return out;
     var starts = []; foods.forEach(function (c) { c.forEach(function (j) { var p = [((j % COLS) + 0.5) * K | 0, (((j / COLS) | 0) + 0.5) * K | 0]; starts.push(p[1] * NX + p[0]); }); });
@@ -260,17 +261,17 @@
 
   /* ---------- the whole hour ---------- */
   function model(T, air, date) {
-    var map = T.map, F = T.F, A = airAt(air, date, T.lat, T.lng, T.rise, T.set), ph = phase(date, T.rise, T.set), W = WEIGHT[ph];
+    var map = T.map, F = T.F, A = airAt(air, date, T.lat, T.lng, T.rise, T.set), ph = phase(date, T.rise, T.set), W = ACTIVE[ph];
     var deer = new Float32Array(NX * NY), onRoute = new Uint8Array(NX * NY);
     T.routes.forEach(function (r) { r.forEach(function (i) { for (var oy = -1; oy <= 1; oy++) for (var ox = -1; ox <= 1; ox++) { var x = i % NX + ox, y = ((i / NX) | 0) + oy; if (x >= 0 && y >= 0 && x < NX && y < NY) onRoute[y * NX + x] = 1; } }); });
-    for (var i = 0; i < NX * NY; i++) { var z = zoneAt(map, i % NX, (i / NX) | 0); deer[i] = Math.max(z === 'B' ? W.B : z === 'F' ? W.F : 0, onRoute[i] ? W.R : 0); }
+    for (var i = 0; i < NX * NY; i++) { var z = zoneAt(map, i % NX, (i / NX) | 0); deer[i] = ((z === 'B' && W.B) || (z === 'F' && W.F) || (onRoute[i] && W.R)) ? 1 : 0; }
     var stands = (map.stands || []).map(function (s) {
       var x0 = s.x * K + K / 2, y0 = s.y * K + K / 2, P = plume(F, A, x0, y0, 6), now = 0, quiet = 0, hitB = 0, hitR = 0, hitF = 0;
       for (var j = 0; j < NX * NY; j++) {
         if (!P.g[j]) continue;
         var z = zoneAt(map, j % NX, (j / NX) | 0), area = z === 'B' || z === 'F' || onRoute[j];
         if (!area) continue;
-        if (deer[j] >= 0.6) { now++; if (z === 'B') hitB++; else if (z === 'F') hitF++; else hitR++; } else quiet++;
+        if (deer[j]) { now++; if (z === 'B') hitB++; else if (z === 'F') hitF++; else hitR++; } else quiet++;
       }
       // red: crosses a deer area where deer likely are this hour; yellow: crosses deer areas that are likely quiet now,
       // or the air is calm / switching so its path can't be trusted; green: crosses no deer area on the property
@@ -286,17 +287,19 @@
     // exposure: does the air from this spot cross a deer area anywhere on the property?
     for (var y = 0; y < NY; y += 2) for (var x = 0; x < NX; x += 2) {
       var pts = trace(F, A, x, y, 1e9), bad = 0;
-      for (var k = 0; k < pts.length; k += 2) { var j = Math.round(pts[k].y) * NX + Math.round(pts[k].x); if (M.deer[j] >= 0.6) { bad = 1; break; } }
+      for (var k = 0; k < pts.length; k += 2) { var j = Math.round(pts[k].y) * NX + Math.round(pts[k].x); if (M.deer[j]) { bad = 1; break; } }
       for (var oy = 0; oy < 2; oy++) for (var ox = 0; ox < 2; ox++) if (y + oy < NY && x + ox < NX) cost[(y + oy) * NX + x + ox] = bad;
     }
     for (var i = 0; i < NX * NY; i++) {
       var z = zoneAt(T.map, i % NX, (i / NX) | 0);
-      cost[i] = 1 + cost[i] * 25 + (M.onRoute[i] ? 6 : 0) + (z === 'B' ? 60 : 0) + (z === 'F' && M.phase !== 'midday' ? 8 : 0) + (z === 'X' ? 40 : 0) + 3 * Math.min(F.sl[i], 0.6);
+      // rank order only: first avoid spots whose air crosses active deer areas, then avoid walking through deer areas or
+      // the neighbor line, then shortest. Tier sizes only keep ranks apart; no deer data.
+      cost[i] = cost[i] ? 1e10 : (M.deer[i] || z === 'B' || z === 'X') ? 1e5 : 1;
     }
     var goal = clamp(Math.round(s.y), 0, NY - 1) * NX + clamp(Math.round(s.x), 0, NX - 1), D = dijkstra(cost, [goal]), best = null;
     T.parking.forEach(function (p) { var j = clamp(p.y * K + 2, 0, NY - 1) * NX + clamp(p.x * K + 2, 0, NX - 1); if (!best || D.dist[j] < D.dist[best]) best = j; });
     var path = [], i2 = best, exposed = 0, crosses = 0;
-    for (var g = 0; i2 >= 0 && g < 5000; g++) { path.push(i2); if (cost[i2] >= 25) exposed++; if (M.onRoute[i2]) crosses++; i2 = D.prev[i2]; }
+    for (var g = 0; i2 >= 0 && g < 5000; g++) { path.push(i2); if (cost[i2] >= 1e10) exposed++; if (M.onRoute[i2]) crosses++; i2 = D.prev[i2]; }
     return { path: path, exposed: exposed, crosses: crosses, from: best };
   }
   var DIR8 = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
@@ -305,7 +308,7 @@
     var A = M.A, out = [], wind = A.calm ? 'Calm, shifting air' : 'Wind from the ' + DIR8[Math.round(((A.tx === 0 && A.ty === 0) ? 0 : ((Math.atan2(-A.tx, A.ty) / D2R) + 360) % 360) / 45) % 8];
     out.push(wind + (A.mode === 'down' ? ', and cooling air is sinking downhill.' : A.mode === 'up' ? ', and warming air is rising uphill.' : ', and the air is switching between rising and sinking.'));
     if (s.color === 'red') out.push('Your air blows over ' + (s.hitB ? 'bedding' : s.hitR ? 'a deer route' : 'the food') + ' where deer should be now. Skip this stand this hour.');
-    else if (s.color === 'yellow') out.push(A.calm ? 'With almost no wind, your air has no steady path and can swirl.' : A.mode === 'mixed' ? 'Around sunrise and sunset the air can flip. Scent may swirl.' : 'Your air crosses deer areas that are likely quiet this hour. Hunt it with care.');
+    else if (s.color === 'yellow') out.push(A.calm ? 'With almost no wind, your air has no steady path and can swirl.' : A.mode === 'mixed' ? 'In the hour after sunrise the air is turning over from downhill to uphill. Scent may swirl.' : 'Your air crosses deer areas that are likely quiet this hour. Hunt it with care.');
     else out.push('Your air does not blow over bedding, food or the routes on the property this hour.');
     if (A.mode === 'down' && s.color !== 'green') out.push('Cold air drains into low ground and carries scent with it.');
     if (w === null) out.push('Mark where you park to get a walk-in.');
@@ -315,7 +318,7 @@
     }
     return out;
   }
-  var PHASE_WORD = { night: 'Night: deer likely on food and moving.', morning: 'Morning: deer likely heading from food back to bed.', midday: 'Midday: deer likely bedded.', evening: 'Evening: deer likely getting up and heading to food.' };
+  var PHASE_WORD = { night: 'Night: deer likely on food and moving.', morning: 'Sunrise hour: deer likely moving between food and bed.', midday: 'Daylight: deer likely bedded, and moving some.', evening: 'Sunset hour: deer likely up and heading to food.' };
 
   /* ---------- rendering (painter's algorithm) ---------- */
   var ZCOL = { B: [52, 92, 46], F: [196, 168, 78], W: [70, 128, 170], C: [64, 118, 160], N: [120, 140, 70], R: [150, 140, 128], X: [150, 80, 70], '.': [104, 128, 76] };
@@ -381,13 +384,13 @@
       bufKey = key; buf = buf || document.createElement('canvas'); buf.width = cv.width; buf.height = cv.height;
       var b = buf.getContext('2d'), r = cv.width / S.w; b.setTransform(r, 0, 0, r, 0, 0); b.clearRect(0, 0, S.w, S.h);
       var step = 2, quads = [], sunEl = M ? M.A.el : 30, night = sunEl < -2, scent = M && M.stands[sel] ? M.stands[sel].plume.g : null;
-      var lx = -0.5, ly = -0.6, lz = 0.62;   // light from the northwest-above (map shading)
+      var lx = -0.5, ly = -0.6, lz = 0.62;   // DISPLAY ONLY: light from the northwest-above (map shading)
       for (var y = 0; y < NY - step; y += step) for (var x = 0; x < NX - step; x += step) {
         var p1 = proj(x, y, zAt(x, y)), p2 = proj(x + step, y, zAt(x + step, y)), p3 = proj(x + step, y + step, zAt(x + step, y + step)), p4 = proj(x, y + step, zAt(x, y + step));
         var i = (y + 1) * NX + x + 1, nx = -T.F.gx[i] * T.ex, ny = -T.F.gy[i] * T.ex, nl = Math.sqrt(nx * nx + ny * ny + 1), sh = clamp((nx * lx + ny * ly + lz) / nl / 0.62, 0.35, 1.25);
         var zc = ZCOL[zoneAt(T.map, x + 1, y + 1)] || ZCOL['.'], col = [zc[0] * sh, zc[1] * sh, zc[2] * sh];
         if (M && M.deer[i] >= 0.6 && zoneAt(T.map, x + 1, y + 1) === '.') col = [col[0] * 0.9 + 30, col[1] * 0.9 + 22, col[2] * 0.9];
-        if (M && M.A.mode === 'down' && T.F.low[i] > 0.6) col = [col[0] * 0.75, col[1] * 0.8, col[2] * 0.8 + 50];   // cold air pooling
+        if (M && M.A.mode === 'down' && T.F.low[i] > 0.6) col = [col[0] * 0.75, col[1] * 0.8, col[2] * 0.8 + 50];   // cold air pooling: DISPLAY ONLY tint (0.6 m below the local mean picks low spots to shade; not used in ratings)
         if (scent) { var sv = Math.max(scent[i], scent[i + 1] || 0, scent[i + NX] || 0); if (sv > 0.05) { var a = 0.2 + 0.35 * sv; col = [col[0] * (1 - a) + 240 * a, col[1] * (1 - a) + 120 * a, col[2] * (1 - a) + 40 * a]; } }
         if (night) col = [col[0] * 0.55, col[1] * 0.6, col[2] * 0.75 + 12];
         quads.push({ d: (p1[2] + p2[2] + p3[2] + p4[2]) / 4, p: [p1, p2, p3, p4], c: 'rgb(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ')' });
@@ -416,7 +419,7 @@
       if (M && M.stands[sel]) {
         parts.forEach(function (p) {
           var i = clamp(Math.round(p.y), 0, NY - 1) * NX + clamp(Math.round(p.x), 0, NX - 1), v = flowAt(T.F, M.A, i), sp = Math.sqrt(v[0] * v[0] + v[1] * v[1]) || 1;
-          var jit = M.A.calm ? 1.2 : M.A.mode === 'mixed' ? 0.6 : 0.25;
+          var jit = M.A.calm ? 1.2 : M.A.mode === 'mixed' ? 0.6 : 0.25;   // DISPLAY ONLY: arrow wobble
           p.x += v[0] / sp * 0.45 + (Math.random() - 0.5) * jit; p.y += v[1] / sp * 0.45 + (Math.random() - 0.5) * jit; p.age++;
           if (p.age > 140 || p.x < 0 || p.y < 0 || p.x >= NX || p.y >= NY) { p.x = M.stands[sel].x; p.y = M.stands[sel].y; p.age = 0; }
           var q = proj(p.x, p.y, zAt(p.x, p.y) + 3); g.fillStyle = 'rgba(255,190,120,' + (0.8 * (1 - p.age / 140)) + ')'; g.beginPath(); g.arc(q[0], q[1], 2.1, 0, 7); g.fill();
@@ -473,5 +476,5 @@
       renderMs: function () { var t0 = performance.now(); bufKey = ''; terrain(); return performance.now() - t0; }
     };
   }
-  window.BLTerrain = { mount: mount, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF, FULL_GRADE: FULL_GRADE };
+  window.BLTerrain = { mount: mount, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF,  };
 })();
