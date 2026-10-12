@@ -641,12 +641,12 @@
     return { view: parts[0] || 'ledger', id: id, q: q };
   }
   function go(h) { if (location.hash === h) render(); else location.hash = h; }
-  window.addEventListener('hashchange', function () { render(); window.scrollTo(0, 0); });
+  window.addEventListener('hashchange', function (e) { var o = String(e && e.oldURL || '').split('#')[1] || ''; if (o.indexOf('/sim') !== 0) t3Day = null; render(); window.scrollTo(0, 0); });
   var VIEWS = {};
   function render() {
     if (!S) return;
     R = parseHash();
-    if (R.view !== 'sim') t3Day = null;
+    if (R.view !== 'sim' || R.q.v !== '3d') t3Day = null;
     if (simApi) { simApi.destroy(); simApi = null; }
     if (simDemo) { simDemo.destroy(); simDemo = null; }
     if (t3Api) { t3Api.destroy(); t3Api = null; }
@@ -1128,9 +1128,24 @@
   };
 
   /* ---------------- More: location, settings, backup, Pro ---------------- */
+  // Field Tips: free for every tier (a hook). Plain words, each with its published source, and a Share button (native share sheet only).
+  function fieldTipsHtml() {
+    if (!window.BLTips) return '';
+    return '<div class="paper" id="field-tips"><h3>Field Tips</h3><p class="small muted">How air acts over water, fields, soil and woods. Free on every plan. Tap a spot in the 3D sim to see the tip for it.</p>' +
+      BLTips.all.map(function (t) {
+        return '<div class="tip" data-tip="' + t.id + '"><h4>' + esc(t.title) + '</h4><p class="small">' + esc(t.text) + '</p>' +
+          '<p class="tiny muted">Source: ' + t.src.map(function (x) { return '<a href="' + esc(x.url) + '" target="_blank" rel="noopener">' + esc(x.name) + '</a> <span>(' + esc(x.v) + ')</span>'; }).join('; ') + '</p>' +
+          '<button class="btn sm ink" data-tip-share="' + t.id + '">Share</button></div>';
+      }).join('') + '</div>';
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('[data-tip-share]'); if (!b || !window.BLTips) return;
+    BLTips.share(b.getAttribute('data-tip-share')).then(function (r) { if (r === 'copied') toast('Tip copied. Paste it anywhere to share.'); });
+  });
   VIEWS.more = function () {
     var st = S.settings;
     var h = head('More');
+    h += fieldTipsHtml();
     var t = tier(), L = st.license;
     h += '<div class="paper" id="pro"><h3>Your plan: ' + TIER_NAME[t] + '</h3>';
     if (t !== 'free') {
@@ -1178,7 +1193,7 @@
 
   /* ---------------- Movement Simulator (Elite): 2D map + 3D terrain, one engine (terrain.js) ---------------- */
   var simApi = null, simDemo = null;
-  var TEASER = '<p class="small">See your property the way a buck and the air see it. The wind and its wavering spread, warm air rising and cool air sinking on your real slopes, and your scent drifting out from each stand. Deer routes run from your bedding to your food. Every stand turns green, yellow or red with a plain reason, and it finds your safest walk-in from where you park. Pick a real day and slide through it hour by hour.</p>';
+  var TEASER = '<p class="small">See your property the way a buck and the air see it. The wind and its wavering spread, warm air rising and cool air sinking on your real slopes, and your scent drifting out from each stand. Deer routes run from your bedding to your food. Every stand turns teal (good), amber (caution) or crimson (avoid) with a plain reason, and it finds your safest walk-in from where you park. Pick a real day and slide through it hour by hour.</p>';
   VIEWS.sim = function () {
     var is3 = R.q.v === '3d';
     var h = head('Simulator') + '<div class="seg" id="sim-tabs" role="tablist" aria-label="Simulator view"><a href="#/sim" role="tab" id="tab-2d" aria-selected="' + !is3 + '"' + (is3 ? '' : ' class="on" aria-current="page"') + '>' + (is3 ? '' : '✓ ') + '2D map</a><a href="#/sim?v=3d" role="tab" id="tab-3d" aria-selected="' + is3 + '"' + (is3 ? ' class="on" aria-current="page"' : '') + '>' + (is3 ? '✓ ' : '') + '3D terrain</a></div>';
@@ -1195,7 +1210,7 @@
   };
   VIEWS.sim.after = function () {
     if (R.q.v === '3d') { mount3d(); return; }
-    if (!isElite()) { var d = $('#sim-demo'); if (d && window.BLTerrain) simDemo = BLTerrain.mount(d, engineHost({ demo: true, flat: true })); return; }
+    if (!isElite()) { var d = $('#sim-demo'); if (d) simDemo = mountPort(d, true); return; }
     var el = $('#sim-root'); if (!el || !window.BuckSim) return;
     simApi = window.BuckSim.mount(el, {
       getMap: function () { return S.map; },
@@ -1213,6 +1228,10 @@
     Object.keys(c).forEach(function (k) { (c[k] || []).forEach(function (e) { if (e && e.e === t) hit = e; }); });
     return hit;
   }
+  /* Aerial photo for the buyer's own box: USGS The National Map "USGS Imagery Only" (mostly USDA NAIP), public domain
+     (USGS FAQ "What are the Terms of Use/Licensing for map services and data from The National Map?"). Fetched only when the
+     3D view opens; the same box as the elevation, so the photo lines up with the ground. */
+  function usgsImageURL(box) { return BLTerrain.imageURL(box, 1536, 1997); }
   var DEMO_BOX = { lat: 38, lng: -90 };   // made-up mid-US spot, only for sunrise/sunset on the Example property
   function engineHost(o) {
     o = o || {};
@@ -1220,7 +1239,8 @@
       var ex = window.BuckSim.example();
       return {
         demo: true, flat: !!o.flat, hour: 16, day: new Date(2026, 10, 8, 12), hasDem: function () { return true; },
-        dem: function () { return BLTerrain.exampleDem(); }, map: function () { return ex; }, box: function () { return { lat: DEMO_BOX.lat, lng: DEMO_BOX.lng, acres: ex.acres }; },
+        dem: function () { return BLTerrain.exampleDem(); }, map: function () { return ex; },
+        aerial: function () { return 'data/example-aerial.jpg'; }, fine: function () { var f = (window.BL_EXAMPLE || {}).fine; return f ? { nx: f.nx, ny: f.ny, z: Float32Array.from(f.zdm, function (v) { return v / 10; }) } : null; }, box: function () { return { lat: DEMO_BOX.lat, lng: DEMO_BOX.lng, acres: ex.acres }; },
         parking: function () { return window.BuckSim.exampleParking(); }, sunTimes: function (d) { return sunTimes(d, DEMO_BOX.lat, DEMO_BOX.lng); },
         when: function (day, h) { return new Date(Date.UTC(day.getFullYear(), day.getMonth(), day.getDate(), h + 6)); },
         air: function () { return null; }, manualAir: function () { return { wd: 225, ws: 6, cc: 20 }; },
@@ -1235,6 +1255,9 @@
       flat: flat, hour: new Date().getHours(), day: t3Day || new Date(), hasDem: function () { return !!(map && map.example) || demOK(); },
       dem: function () { if (map && map.example) return BLTerrain.exampleDem(); return demOK() ? DEM.z : (flat ? new Float32Array(BLTerrain.NX * BLTerrain.NY) : null); },
       map: function () { return map; }, box: function () { return box; },
+      aerial: function () { return map && map.example ? 'data/example-aerial.jpg' : usgsImageURL(box); },
+      fine: function () { return map && map.example ? engineHost({ demo: true }).fine() : null; },
+      fineDem: function () { return map && map.example ? null : BLTerrain.demURL(box, BLTerrain.NX * 3, BLTerrain.NY * 3); },
       parking: function () { return o.parking || (S.t3 && S.t3.parking) || []; }, sunTimes: function (d) { return sunTimes(d, box.lat, box.lng); },
       when: function (day, h) { var e = siteEntry(box, day, h); return e ? new Date(e.e) : new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, 0, 0); },
       air: function (d) { var h = siteAt(box, d); return h && h.wd !== null ? { wd: h.wd, ws: h.ws || 0, cc: h.cc, t: h.t } : null; },
@@ -1546,7 +1569,7 @@
   };
 
   /* ================= v3: 3D terrain sim host ================= */
-  function demKey(box) { return box.lat.toFixed(5) + ',' + box.lng.toFixed(5) + ',' + box.acres; }
+  function demKey(box) { return 'm3857,' + box.lat.toFixed(5) + ',' + box.lng.toFixed(5) + ',' + box.acres; }
   function fetchDem() {
     var box = S.t3 && S.t3.box; if (!box || !window.BLTerrain) return Promise.resolve(false);
     if (!navigator.onLine) { toast('No internet right now. Try again when you’re online.', 3500); return Promise.resolve(false); }
@@ -1584,9 +1607,9 @@
   function sim3dHtml() {
     if (!isElite()) {
       var t = tier();
-      return '<div class="paper" id="t3-locked"><h3>🔒 3D Terrain Sim is Elite</h3><p class="small">Your real ground in 3D from USGS elevation, with wind, rising and sinking air and your moving scent. Stands turn green, yellow or red with a plain reason, and it finds your safest walk-in. Pick a real day and slide through it.</p>' +
+      return '<div class="paper" id="t3-locked"><h3>🔒 3D Terrain Sim is Elite</h3><p class="small">Your real ground in 3D from USGS elevation, with wind, rising and sinking air and your moving scent. Stands turn teal, amber or crimson with a plain reason, and it finds your safest walk-in. Pick a real day and slide through it.</p>' +
         (t === 'pro' ? buyBtn('upgrade', 'Upgrade to Elite') : buyBtn('elite', 'Get Elite')) + (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more">I have a license key</a>' : '') + '</div>' +
-        '<div class="paper"><h3>Try it on the Example property</h3><p class="tiny muted" style="margin:0 0 6px">Example property. Not your land.</p><div id="t3-root"></div></div>';
+        '<div class="paper"><h3>Try it on the Example property</h3><p class="tiny muted" style="margin:0 0 6px">Example property. Not your land.</p><div id="t3-root"></div><p class="t3-credit">Example aerial photo: USDA NAIP via USGS, flown October 2023. Elevation: USGS 3DEP lidar. Map services and data available from U.S. Geological Survey, National Geospatial Program.</p></div>';
     }
     var box = S.t3 && S.t3.box;
     if (!box) {
@@ -1599,13 +1622,23 @@
     var have = DEM && DEM.key === demKey(box);
     if (!have) return '<div class="paper" id="t3-fetch"><h3>Get your elevation</h3><p class="small">One download from USGS 3DEP for your box (about 70 KB). It is saved on this phone, so you only do this once. Only the box corners are sent.</p><button class="btn go block" data-act="t3-dem">Get USGS elevation</button><button class="btn ink block" style="margin-top:8px" data-act="t3-reset">Change the box</button></div>';
     return '<div id="t3-root"></div><div class="btn-row" style="margin-top:8px"><button class="btn ink" data-act="t3-park">Mark parking</button><a class="btn ink" href="#/sim">Edit 2D map</a><button class="btn ink" data-act="t3-reset">Change box</button></div>' +
-      '<p class="tiny muted">Model, not a forecast. The wind is run with its normal wavering spread for the hour (EPA stability classes). Wind under cover uses US Forest Service shelter factors; slope air uses published downslope and upslope speeds; scent spread uses textbook formulas (Turner stability, Briggs spread). Stands are rated only by whether your air blows over bedding, routes or food on the property (National Deer Association: keep your scent from blowing toward deer): red when the middle of the wind spread does, yellow when only its edges do. Deer routes are worked out in the phone from your own bedding and food marks.</p>';
+      '<p class="tiny muted">Model, not a forecast. The wind is run with its normal wavering spread for the hour (EPA stability classes). Wind under cover uses US Forest Service shelter factors; slope air uses published downslope and upslope speeds; scent spread uses textbook formulas (Turner stability, Briggs spread). Stands are rated only by whether your air blows over bedding, routes or food on the property (National Deer Association: keep your scent from blowing toward deer): crimson when the middle of the wind spread does, amber when only its edges do. Deer routes are worked out in the phone from your own bedding and food marks.</p><p class="t3-credit">Aerial photo: USGS The National Map, Imagery Only (mostly USDA NAIP, leaf-on; flight year varies by area). Elevation: USGS 3DEP. Map services and data available from U.S. Geological Survey, National Geospatial Program.</p>';
   }
   function mount3d() {
     var el = $('#t3-root'); if (!el || !window.BLTerrain) return;
     var demo = !isElite(); if (!demo && !(S.t3 && S.map)) return;
-    t3Api = BLTerrain.mount(el, t3Host(demo));
-    if (t3Day && !demo) { var dt = el.querySelector('.t3-date'); if (dt) { dt.value = ymdOf(t3Day); dt.dispatchEvent(new Event('change', { bubbles: true })); } }
+    t3Api = mountPort(el, demo);
+  }
+  // 3D view = the original sim ported 1:1 (hbk3d/), loaded only when the 3D view opens. Example: the original precomputed data, names hidden.
+  // Elite: the same renderer on the buyer's own USGS 3DEP ground and USGS aerial, with the engine run in the phone.
+  function mountPort(el, demo) {
+    if (!demo) window.BL_BUYER_INPUT = { box: S.t3.box, map: S.map, parking: (S.t3 && S.t3.parking) || [], day: (t3Day || new Date()).getTime() };
+    var f = document.createElement('iframe'); f.className = 't3-port'; f.title = '3D terrain sim'; f.setAttribute('allow', 'web-share; clipboard-write');
+    f.src = 'hbk3d/sim.html?' + (demo ? 'ex=1&day=oct05' : 'buyer=1'); el.appendChild(f);
+    var api = function () { try { return f.contentWindow && f.contentWindow.__ready && f.contentWindow.__BL; } catch (e) { return null; } };
+    return { destroy: function () { f.remove(); }, refresh: function () { if (!demo && f.contentWindow) f.contentWindow.location.reload(); }, frame: f,
+      ready: function () { return !!api(); }, state: function () { var a = api(); return a ? a.state() : null; }, setHour: function (h) { var a = api(); if (a) a.setClock(h); }, gl: function () { return api(); },
+      renderMs: function () { var a = api(); return a ? a.renderMs() : null; }, setSel: function (i) { var a = api(); return a ? a.setSel(i) : null; } };
   }
   document.addEventListener('change', function (e) {
     if (e.target && (e.target.id === 't3-wd' || e.target.id === 't3-ws')) { MANUAL_WIND.wd = Number($('#t3-wd').value); MANUAL_WIND.ws = Number($('#t3-ws').value); engines().forEach(function (x) { x.refresh(); }); }

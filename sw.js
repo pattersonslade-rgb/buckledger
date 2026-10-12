@@ -1,8 +1,8 @@
 /* Buck Ledger service worker: caches the app files on the phone.
  * Bump VERSION whenever you publish changes. */
-var VERSION = 'buckledger-v3.1.1';
+var VERSION = 'buckledger-v3.4.0';
 var ASSETS = [
-  './', 'index.html', 'styles.css', 'app.js', 'sim.js', 'terrain.js', 'astro.js', 'wx.js', 'ocr.js', 'data/states.js', 'data/example.js', 'config.js', 'manifest.webmanifest', 'privacy.html',
+  './', 'index.html', 'styles.css', 'app.js', 'sim.js', 'terrain.js', 'astro.js', 'wx.js', 'ocr.js', 'data/states.js', 'data/example.js', 'fieldtips.js', 'config.js', 'manifest.webmanifest', 'privacy.html',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png', 'icons/favicon-32.png'
 ];
 self.addEventListener('install', function (e) {
@@ -17,7 +17,7 @@ self.addEventListener('activate', function (e) {
 self.addEventListener('fetch', function (e) {
   var req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== self.location.origin) return;
-  var isNav = req.mode === 'navigate';
+  var isNav = req.mode === 'navigate' && req.destination !== 'iframe'; // the 3D sim frame is its own page
   e.respondWith(caches.open(VERSION).then(function (cache) {
     return cache.match(isNav ? 'index.html' : req, { ignoreSearch: true }).then(function (hit) {
       var net = fetch(req).then(function (res) {

@@ -15,16 +15,28 @@
 
   /* ---------- 3DEP: box, URL, TIFF ---------- */
   // box: { lat, lng, acres } -> bbox around the centre, aspect = 2D map (20 wide x 26 tall), north up
+  // Elevation and aerial photo are both requested in Web Mercator (EPSG:3857) for the SAME box. In 3857 a ground box with the
+  // map's shape keeps square pixels, so the USGS servers return exactly the box asked for (in lat/long degrees they widen it
+  // to keep pixels square, which would shift things). The box is sized in true ground metres at the property's latitude.
+  var RM = 6378137;
+  function merc(lat, lng) { return [RM * lng * D2R, RM * Math.log(Math.tan(Math.PI / 4 + lat * D2R / 2))]; }
   function bbox(box) {
     var area = box.acres * 4046.86, w = Math.sqrt(area / (ROWS / COLS)), h = w * ROWS / COLS;
     var dLat = h / 2 / 111320, dLng = w / 2 / (111320 * Math.cos(box.lat * D2R));
-    return { w: box.lng - dLng, s: box.lat - dLat, e: box.lng + dLng, n: box.lat + dLat, wm: w, hm: h };
+    var c = merc(box.lat, box.lng), k = 1 / Math.cos(box.lat * D2R);   // 3857 metres per ground metre at this latitude
+    return { w: box.lng - dLng, s: box.lat - dLat, e: box.lng + dLng, n: box.lat + dLat, wm: w, hm: h,
+      mx0: c[0] - w / 2 * k, my0: c[1] - h / 2 * k, mx1: c[0] + w / 2 * k, my1: c[1] + h / 2 * k, k: k };
   }
-  function demURL(box) {
+  function mercBox(b) { return [b.mx0, b.my0, b.mx1, b.my1].map(function (v) { return v.toFixed(2); }).join(','); }
+  function demURL(box, nx, ny) {
     var b = bbox(box);
-    return 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox=' +
-      [b.w, b.s, b.e, b.n].map(function (v) { return v.toFixed(6); }).join(',') +
-      '&bboxSR=4326&imageSR=4326&size=' + NX + ',' + NY + '&format=tiff&pixelType=F32&noData=-9999&interpolation=RSP_BilinearInterpolation&compression=None&f=image';
+    return 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox=' + mercBox(b) +
+      '&bboxSR=3857&imageSR=3857&size=' + (nx || NX) + ',' + (ny || NY) + '&format=tiff&pixelType=F32&noData=-9999&interpolation=RSP_BilinearInterpolation&compression=None&f=image';
+  }
+  function imageURL(box, nx, ny) {
+    var b = bbox(box);
+    return 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/export?bbox=' + mercBox(b) +
+      '&bboxSR=3857&imageSR=3857&size=' + (nx || 1536) + ',' + (ny || 1997) + '&format=jpg&f=image';
   }
   function parseTiff(buf) {
     var v = new DataView(buf), le;
@@ -365,8 +377,9 @@
   var PHASE_WORD = { night: 'Night: deer likely on food and moving.', morning: 'Sunrise hour: deer likely moving between food and bed.', midday: 'Daylight: deer likely bedded, and moving some.', evening: 'Sunset hour: deer likely up and heading to food.' };
 
   /* ---------- rendering (painter's algorithm) ---------- */
-  var ZCOL = { B: [52, 92, 46], F: [196, 168, 78], W: [70, 128, 170], C: [64, 118, 160], N: [120, 140, 70], R: [150, 140, 128], X: [150, 80, 70], '.': [104, 128, 76] };
+  var ZCOL = { B: [46, 125, 50], F: [200, 162, 106], W: [30, 79, 168], C: [30, 79, 168], N: [120, 140, 70], R: [150, 140, 128], X: [150, 80, 70], '.': [104, 128, 76] };
   function mount(el, host) {
+    var LAY = { wind: false, thermals: false, scent: true, routes: true };
     var flat = !!host.flat, T = null, view = flat ? { yaw: 0, pitch: Math.PI / 2 } : { yaw: -0.5, pitch: 0.95 }, hour = host.hour == null ? 17 : host.hour, day = host.day || new Date(), sel = 0, M = null, W = null, raf = 0, parts = [], dead = false, buf = null, bufKey = '';
     var demo = !!host.demo;
     el.innerHTML = '<div class="t3">' + (demo ? '<div class="t3-demo">Example property. Not your land.</div>' : '') +
@@ -374,9 +387,35 @@
       '<div class="t3-ctl"><label class="t3-scrub"><span class="t3-when"></span><input type="range" min="0" max="23" step="1" class="t3-hour" aria-label="Time of day"></label>' +
       '<div class="t3-row">' + (demo ? '' : '<label class="field t3-day"><span>Day</span><input type="date" class="t3-date"></label>') +
       (flat ? '' : '<button class="btn sm ink" data-t3="turn">Turn</button><button class="btn sm ink" data-t3="top">Top view</button>') + '</div>' +
+      ('<div class="t3-chips" role="group" aria-label="Show on the map">' + [['wind', 'Wind'], ['thermals', 'Thermals'], ['scent', 'Scent'], ['routes', 'Routes']].map(function (c) { return '<button type="button" class="t3-chip' + (LAY[c[0]] ? ' on' : '') + '" data-t3l="' + c[0] + '" aria-pressed="' + !!LAY[c[0]] + '">' + c[1] + '</button>'; }).join('') + '</div>') +
+      (flat ? '' : '<label class="t3-ex"><span>Exaggerate terrain</span><input type="range" min="1" max="10" step="0.5" value="3" class="t3-exag" aria-label="Exaggerate terrain"><span class="t3-exw"><i>Natural</i><i>Strong</i></span></label>') +
       '<div class="t3-air"></div><div class="t3-stands"></div><ul class="t3-why read"></ul></div></div>';
     var cv = el.querySelector('canvas'), g = cv.getContext('2d'), hr = el.querySelector('.t3-hour'), dt = el.querySelector('.t3-date');
     hr.value = hour; if (dt) dt.value = ymd(day);
+    var gl = null, exag = 3, glTried = false, stage = el.querySelector('.t3-stage');
+    function zoneW(gx, gy) { return zoneAt(T.map, clamp(gx, 0, NX - 1), clamp(gy, 0, NY - 1)); }
+    function pushGL() {
+      if (!gl || !T || !M) return;
+      var s = M.stands[sel], lowMax = 0; for (var i = 0; i < NX * NY; i++) if (T.F.low[i] > lowMax) lowMax = T.F.low[i];
+      var fine = host.fine ? host.fine() : null, d = when(hour);
+      gl.update({ NX: NX, NY: NY, K: K, COLS: COLS, ROWS: ROWS, z: T.z, wm: T.wm, hm: T.hm, map: T.map, routes: T.routes, routeCam: T.routeCam, parking: T.parking,
+        stands: M.stands, sel: sel, walk: W, why: M.stands.map(function (st) { var r = reasons(T, M, st, undefined); return r[1] || r[0] || ''; }), phase: M.phase, mode: M.A.mode, calm: M.A.calm, windTo: [M.A.tx, M.A.ty], sunEl: M.A.el, sunAz: ((d.getTime() / 36e5 + (T.lng || 0) / 15) % 24 + 24) % 24 / 24 * 360,   // solar-time direction of the sun, for shading only
+        mem: M.mem, flowAt: function (i) { return flowAt(T.F, M.A, i); }, flowAtM: function (m, i) { return flowAt(T.F, M.mem[m] || M.A, i); },
+        scentGrid: s ? s.plume.g : null, low: T.F.low, lowMax: lowMax, zoneAt: zoneW,
+        aerial: host.aerial ? host.aerial() : null, fine: fine, fineURL: fine ? null : (host.fineDem ? host.fineDem() : null),
+        key: JSON.stringify(host.box()) + T.map.cells });
+    }
+    function tryGL() {
+      if (flat || glTried || host.gl === false) return; glTried = true;
+      import('./t3gl.js').then(function (m) {
+        if (dead) return;
+        gl = m.create(stage, { tipAt: function (gx, gy) {   // which Field Tip fits this spot: water, low bottom, field, woods, else slope
+          if (!window.BLTips || !T) return null; var i = clamp(Math.round(gy), 0, NY - 1) * NX + clamp(Math.round(gx), 0, NX - 1), z = zoneW(Math.round(gx), Math.round(gy));
+          var ty = (z === 'W' || z === 'C') ? 'water' : z === 'F' ? 'field' : z === 'B' ? 'woods' : (T.F.low[i] > 0.6 ? 'bottom' : 'slope');
+          return BLTips.byType(ty); }, layers: LAY, exag: exag, parseTiff: parseTiff, onPick: function (k) { sel = k; compute(); }, onAerial: function () {} });
+        if (gl) { cv.style.display = 'none'; pushGL(); }
+      }).catch(function () { gl = null; });
+    }
     function ymd(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2); }
     function setup() {
       var z = host.dem(), map = host.map(), box = host.box();
@@ -410,7 +449,7 @@
       el.querySelector('.t3-air').innerHTML = host.airNote ? host.airNote(d) : '';
       el.querySelector('.t3-stands').innerHTML = M.stands.length ? M.stands.map(function (s2, k) { return '<button class="t3-st ' + s2.color + (k === sel ? ' on' : '') + '" data-t3st="' + k + '"><i></i>' + esc(s2.name) + '</button>'; }).join('') : '<p class="small muted">No stands yet. Add them in the 2D map editor.</p>';
       el.querySelector('.t3-why').innerHTML = s ? reasons(T, M, s, W).map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') : '';
-      bufKey = ''; seed();
+      bufKey = ''; seed(); pushGL();
     }
     // projection
     function size() { var w = el.clientWidth || 360, h = Math.round(Math.min(w * 0.95, 520)), r = Math.min(window.devicePixelRatio || 1, 2); cv.width = w * r; cv.height = h * r; cv.style.height = h + 'px'; g.setTransform(r, 0, 0, r, 0, 0); return { w: w, h: h }; }
@@ -434,8 +473,9 @@
         var i = (y + 1) * NX + x + 1, nx = -T.F.gx[i] * T.ex, ny = -T.F.gy[i] * T.ex, nl = Math.sqrt(nx * nx + ny * ny + 1), sh = clamp((nx * lx + ny * ly + lz) / nl / 0.62, 0.35, 1.25);
         var zc = ZCOL[zoneAt(T.map, x + 1, y + 1)] || ZCOL['.'], col = [zc[0] * sh, zc[1] * sh, zc[2] * sh];
         if (M && M.deer[i] >= 0.6 && zoneAt(T.map, x + 1, y + 1) === '.') col = [col[0] * 0.9 + 30, col[1] * 0.9 + 22, col[2] * 0.9];
-        if (M && M.A.mode === 'down' && T.F.low[i] > 0.6) col = [col[0] * 0.75, col[1] * 0.8, col[2] * 0.8 + 50];   // cold air pooling: DISPLAY ONLY tint (0.6 m below the local mean picks low spots to shade; not used in ratings)
-        if (scent) { var sv = Math.max(scent[i], scent[i + 1] || 0, scent[i + NX] || 0); if (sv > 0.05) { var a = 0.2 + 0.35 * sv; col = [col[0] * (1 - a) + 240 * a, col[1] * (1 - a) + 120 * a, col[2] * (1 - a) + 40 * a]; } }
+        if (M && LAY.thermals && M.A.mode === 'down' && T.F.low[i] > 0.6) col = [col[0] * 0.75, col[1] * 0.8, col[2] * 0.8 + 50];   // cold air pooling: DISPLAY ONLY tint (0.6 m below the local mean picks low spots to shade; not used in ratings)
+        if (M && LAY.thermals && M.A.mode !== 'mixed') { var tw = 0.16; col = M.A.mode === 'down' ? [col[0] * (1 - tw) + 127 * tw, col[1] * (1 - tw) + 212 * tw, col[2] * (1 - tw) + 255 * tw] : [col[0] * (1 - tw) + 255 * tw, col[1] * (1 - tw) + 128 * tw, col[2] * (1 - tw) + 171 * tw]; }
+        if (scent && LAY.scent) { var sv = Math.max(scent[i], scent[i + 1] || 0, scent[i + NX] || 0); if (sv > 0.05) { var a = 0.2 + 0.35 * sv; col = [col[0] * (1 - a) + 156 * a, col[1] * (1 - a) + 107 * a, col[2] * (1 - a) + 255 * a]; } }
         if (night) col = [col[0] * 0.55, col[1] * 0.6, col[2] * 0.75 + 12];
         quads.push({ d: (p1[2] + p2[2] + p3[2] + p4[2]) / 4, p: [p1, p2, p3, p4], c: 'rgb(' + (col[0] | 0) + ',' + (col[1] | 0) + ',' + (col[2] | 0) + ')' });
       }
@@ -445,53 +485,51 @@
     function seed() { parts = []; if (!M || !M.stands[sel]) return; var s = M.stands[sel]; for (var k = 0; k < 120; k++) parts.push({ x: s.x, y: s.y, age: Math.random() * 120, m: k % M.mem.length }); }
     function frame(ts) {
       if (dead) return;
+      if (gl) return;
       if (!T) { g.clearRect(0, 0, S.w, S.h); return; }
       terrain(); g.clearRect(0, 0, S.w, S.h); g.drawImage(buf, 0, 0, S.w, S.h);
       var t = (ts || 0) / 1000;
-      // air arrows: where the air near the ground moves (wind under cover + slope air); blue = sinking, orange = rising
-      if (M) {
-        var stp = flat ? 8 : 10, ph2 = (t * 0.6) % 1;
+      // wind (chip): a few soft streaks that drift with the near-ground air, no per-cell arrows
+      if (M && LAY.wind) {
+        var stp = 16, ph2 = (t * 0.25) % 1;
+        g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 2; g.lineCap = 'round';
         for (var ay = stp / 2; ay < NY; ay += stp) for (var ax = stp / 2; ax < NX; ax += stp) {
           var ai = ay * NX + ax, v = flowAt(T.F, M.A, ai), vs = Math.sqrt(v[0] * v[0] + v[1] * v[1]); if (vs < 0.05) continue;
-          var L2 = stp * 0.42, bx = ax - v[0] / vs * L2 * (0.5 - ph2), by = ay - v[1] / vs * L2 * (0.5 - ph2);
-          var p0 = proj(bx - v[0] / vs * L2 / 2, by - v[1] / vs * L2 / 2, zAt(bx, by) + 4), p1 = proj(bx + v[0] / vs * L2 / 2, by + v[1] / vs * L2 / 2, zAt(bx, by) + 4), an = Math.atan2(p1[1] - p0[1], p1[0] - p0[0]);
-          g.strokeStyle = M.A.mode === 'down' ? 'rgba(140,190,255,.8)' : M.A.mode === 'up' ? 'rgba(255,190,120,.8)' : 'rgba(235,235,235,.75)'; g.lineWidth = 1.6;
+          var L2 = stp * 0.5, bx = ax + v[0] / vs * L2 * (ph2 - 0.5), by = ay + v[1] / vs * L2 * (ph2 - 0.5);
+          var p0 = proj(bx - v[0] / vs * L2 / 2, by - v[1] / vs * L2 / 2, zAt(bx, by) + 4), p1 = proj(bx + v[0] / vs * L2 / 2, by + v[1] / vs * L2 / 2, zAt(bx, by) + 4);
           g.beginPath(); g.moveTo(p0[0], p0[1]); g.lineTo(p1[0], p1[1]); g.stroke();
-          g.save(); g.translate(p1[0], p1[1]); g.rotate(an); g.fillStyle = g.strokeStyle; g.beginPath(); g.moveTo(4, 0); g.lineTo(-3, -3); g.lineTo(-3, 3); g.closePath(); g.fill(); g.restore();
         }
       }
-      // deer routes: moving arrows (bed -> food in the evening and night, food -> bed in the morning)
-      if (M) T.routes.forEach(function (r) {
-        var rev = M.phase === 'morning' || M.phase === 'midday', pts = rev ? r.slice().reverse() : r, a = M.phase === 'midday' ? 0.35 : 0.95;
-        var cam = T.routeCam[T.routes.indexOf(r)] || [], camPts = rev ? cam.slice().reverse() : cam;
-        g.strokeStyle = 'rgba(255,248,225,' + (a * 0.55) + ')'; g.lineWidth = 2;
-        for (var q = 1; q < pts.length; q++) { var pa = proj(pts[q - 1] % NX, (pts[q - 1] / NX) | 0, T.z[pts[q - 1]] + 2), pb = proj(pts[q] % NX, (pts[q] / NX) | 0, T.z[pts[q]] + 2); g.setLineDash(camPts[q] ? [] : [4, 4]); g.beginPath(); g.moveTo(pa[0], pa[1]); g.lineTo(pb[0], pb[1]); g.stroke(); }
-        g.setLineDash([]);
-        var gap = 9, off = Math.floor(t * 6) % gap;
-        for (var k = off; k + 2 < pts.length; k += gap) {
-          var i0 = pts[k], i1 = pts[k + 2], p0 = proj(i0 % NX, (i0 / NX) | 0, T.z[i0] + 2), p1 = proj(i1 % NX, (i1 / NX) | 0, T.z[i1] + 2), ang = Math.atan2(p1[1] - p0[1], p1[0] - p0[0]);
-          g.save(); g.translate(p1[0], p1[1]); g.rotate(ang); g.fillStyle = 'rgba(255,240,200,' + a + ')'; g.beginPath(); g.moveTo(6, 0); g.lineTo(-4, -4.5); g.lineTo(-1.5, 0); g.lineTo(-4, 4.5); g.closePath(); g.fill(); g.restore();
-        }
+      // buck routes (chip): 2-4 bold smooth paths with a glow moving bed -> food in the evening, back in the morning
+      if (M && LAY.routes) T.routes.slice().sort(function (a, c) { return c.length - a.length; }).slice(0, 4).forEach(function (r, ri) {
+        var rev = M.phase === 'morning' || M.phase === 'midday', pts = rev ? r.slice().reverse() : r, a = M.phase === 'midday' ? 0.4 : 0.95, P2 = [];
+        for (var q = 0; q < pts.length; q += 3) P2.push(proj(pts[q] % NX, (pts[q] / NX) | 0, T.z[pts[q]] + 2));
+        var lq = pts[pts.length - 1]; P2.push(proj(lq % NX, (lq / NX) | 0, T.z[lq] + 2)); if (P2.length < 2) return;
+        g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = 'rgba(255,210,63,' + (a * 0.85) + ')'; g.lineWidth = 5; g.beginPath(); g.moveTo(P2[0][0], P2[0][1]);
+        for (var k = 1; k < P2.length - 1; k++) g.quadraticCurveTo(P2[k][0], P2[k][1], (P2[k][0] + P2[k + 1][0]) / 2, (P2[k][1] + P2[k + 1][1]) / 2);
+        g.lineTo(P2[P2.length - 1][0], P2[P2.length - 1][1]); g.stroke();
+        var gk = Math.floor(((t * 0.12 + ri * 0.27) % 1) * (P2.length - 1)), gp = P2[gk], gr = g.createRadialGradient(gp[0], gp[1], 0, gp[0], gp[1], 12);
+        gr.addColorStop(0, 'rgba(255,255,230,' + a + ')'); gr.addColorStop(1, 'rgba(255,255,230,0)'); g.fillStyle = gr; g.beginPath(); g.arc(gp[0], gp[1], 12, 0, 7); g.fill();
       });
       // moving scent from the picked stand
-      if (M && M.stands[sel]) {
+      if (M && LAY.scent && M.stands[sel]) {
         parts.forEach(function (p) {
           var i = clamp(Math.round(p.y), 0, NY - 1) * NX + clamp(Math.round(p.x), 0, NX - 1), v = flowAt(T.F, M.mem[p.m] || M.A, i), sp = Math.sqrt(v[0] * v[0] + v[1] * v[1]) || 1;
           var jit = M.A.calm ? 1.2 : M.A.mode === 'mixed' ? 0.6 : 0.25;   // DISPLAY ONLY: arrow wobble
           p.x += v[0] / sp * 0.45 + (Math.random() - 0.5) * jit; p.y += v[1] / sp * 0.45 + (Math.random() - 0.5) * jit; p.age++;
           if (p.age > 140 || p.x < 0 || p.y < 0 || p.x >= NX || p.y >= NY) { p.x = M.stands[sel].x; p.y = M.stands[sel].y; p.age = 0; }
-          var q = proj(p.x, p.y, zAt(p.x, p.y) + 3); g.fillStyle = 'rgba(255,190,120,' + (0.8 * (1 - p.age / 140)) + ')'; g.beginPath(); g.arc(q[0], q[1], 2.1, 0, 7); g.fill();
+          var q = proj(p.x, p.y, zAt(p.x, p.y) + 3); g.fillStyle = 'rgba(156,107,255,' + (0.8 * (1 - p.age / 140)) + ')'; g.beginPath(); g.arc(q[0], q[1], 2.1, 0, 7); g.fill();
         });
       }
       // walk-in
       if (W && W.path) {
-        g.setLineDash([5, 5]); g.lineDashOffset = -t * 12; g.strokeStyle = W.exposed ? '#ffd166' : '#ffffff'; g.lineWidth = 2.5; g.beginPath();
+        g.setLineDash([5, 5]); g.lineDashOffset = -t * 12; g.strokeStyle = '#c6ff00'; g.lineWidth = 2.5; g.beginPath();
         W.path.forEach(function (i, k) { var p = proj(i % NX, (i / NX) | 0, T.z[i] + 3); if (k) g.lineTo(p[0], p[1]); else g.moveTo(p[0], p[1]); }); g.stroke(); g.setLineDash([]);
       }
       // parking + stands
       T.parking.forEach(function (p) { var q = proj(p.x * K + 2, p.y * K + 2, zAt(p.x * K + 2, p.y * K + 2) + 4); g.fillStyle = '#1d3557'; g.fillRect(q[0] - 8, q[1] - 8, 16, 16); g.fillStyle = '#fff'; g.font = 'bold 11px system-ui,sans-serif'; g.textAlign = 'center'; g.fillText('P', q[0], q[1] + 4); });
       if (M) M.stands.forEach(function (s, k) {
-        var q = proj(s.x, s.y, zAt(s.x, s.y) + 6), c = { green: '#2ea043', yellow: '#e3b341', red: '#d1242f' }[s.color];
+        var q = proj(s.x, s.y, zAt(s.x, s.y) + 6), c = { green: '#00bfa5', yellow: '#ff8a00', red: '#a0001e' }[s.color];   // PALETTE (t3gl.js / README)
         g.strokeStyle = '#111'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(q[0], q[1]); g.lineTo(q[0], q[1] - 16); g.stroke();
         g.fillStyle = c; g.beginPath(); g.arc(q[0], q[1] - 20, k === sel ? 8 : 6, 0, 7); g.fill(); g.lineWidth = k === sel ? 3 : 1.5; g.strokeStyle = '#fff'; g.stroke();
         g.font = (k === sel ? 'bold ' : '') + '12px system-ui,sans-serif'; g.textAlign = 'center'; g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,.65)'; g.strokeText(s.name, q[0], q[1] - 32); g.fillStyle = '#fff'; g.fillText(s.name, q[0], q[1] - 32);
@@ -515,24 +553,29 @@
       if (drag && !drag.moved && M) { var r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top; M.stands.forEach(function (s, k) { if (Math.hypot(s.sx - x, s.sy - y) < 22) { sel = k; compute(); } }); }
       drag = null;
     });
-    el.addEventListener('input', function (e) { if (e.target === hr) { hour = Number(hr.value); compute(); } });
+    el.addEventListener('input', function (e) { if (e.target === hr) { hour = Number(hr.value); compute(); } else if (e.target.classList.contains('t3-exag')) { exag = Number(e.target.value); if (gl) gl.setExag(exag); } });
     el.addEventListener('change', function (e) { if (e.target === dt && dt.value) { var p = dt.value.split('-'); day = new Date(+p[0], p[1] - 1, +p[2], 12); setup(); compute(); if (host.onDay) host.onDay(day); } });
     el.addEventListener('click', function (e) {
+      var lb = e.target.closest('[data-t3l]');
+      if (lb) { var k = lb.getAttribute('data-t3l'); LAY[k] = !LAY[k]; lb.classList.toggle('on', LAY[k]); lb.setAttribute('aria-pressed', LAY[k]); if (gl) gl.setLayers(LAY); return; }
       var b = e.target.closest('[data-t3]'), st = e.target.closest('[data-t3st]');
       if (st) { sel = Number(st.getAttribute('data-t3st')); compute(); return; }
       if (!b) return; var a = b.getAttribute('data-t3');
+      if (gl) { gl.view(a); return; }
       if (a === 'turn') view.yaw += Math.PI / 4; else if (a === 'top') view.pitch = view.pitch > 1.5 ? 0.95 : Math.PI / 2;
     });
     function onResize() { S = size(); bufKey = ''; }
     window.addEventListener('resize', onResize);
-    setup(); compute(); raf = requestAnimationFrame(frame);
+    setup(); compute(); raf = requestAnimationFrame(frame); tryGL();
     return {
-      destroy: function () { dead = true; cancelAnimationFrame(raf); window.removeEventListener('resize', onResize); },
+      destroy: function () { dead = true; cancelAnimationFrame(raf); window.removeEventListener('resize', onResize); if (gl) gl.destroy(); },
+      gl: function () { return gl; }, setLayers: function (o) { Object.keys(o).forEach(function (k) { LAY[k] = !!o[k]; var c = el.querySelector('[data-t3l=' + k + ']'); if (c) c.classList.toggle('on', LAY[k]); }); if (gl) gl.setLayers(LAY); },
+      setExag: function (e) { exag = e; var x = el.querySelector('.t3-exag'); if (x) x.value = e; if (gl) gl.setExag(e); },
       refresh: function () { setup(); compute(); },
-      state: function () { return M ? { phase: M.phase, mode: M.A.mode, cls: M.A.cls, calm: M.A.calm, stands: M.stands.map(function (s) { return { name: s.name, color: s.color, hitB: s.hitB, hitR: s.hitR, quiet: s.quiet, edgeOnly: s.edgeOnly, off: s.off }; }), members: M.mem.length, flat: flat, hasDem: T.hasDem, when: when(hour).toISOString(), routeCam: T.routeCam.map(function (r) { return r.some(Boolean); }), routes: T.routes.length, walk: W ? { len: W.path.length, exposed: W.exposed } : W, why: Array.prototype.map.call(el.querySelectorAll('.t3-why li'), function (l) { return l.textContent; }) } : null; },
+      state: function () { return M ? { phase: M.phase, mode: M.A.mode, cls: M.A.cls, calm: M.A.calm, stands: M.stands.map(function (s) { return { name: s.name, color: s.color, hitB: s.hitB, hitR: s.hitR, quiet: s.quiet, edgeOnly: s.edgeOnly, off: s.off }; }), members: M.mem.length, flat: flat, webgl: !!gl, layers: JSON.parse(JSON.stringify(LAY)), counts: gl ? gl.counts() : null, aerial: !!(gl && gl.hasAerial()), fineGround: !!(gl && gl.usesFine()), exag: exag, hasDem: T.hasDem, when: when(hour).toISOString(), routeCam: T.routeCam.map(function (r) { return r.some(Boolean); }), routes: T.routes.length, walk: W ? { len: W.path.length, exposed: W.exposed } : W, why: Array.prototype.map.call(el.querySelectorAll('.t3-why li'), function (l) { return l.textContent; }) } : null; },
       setHour: function (h) { hour = h; hr.value = h; compute(); }, setSel: function (k) { sel = k; compute(); },
       renderMs: function () { var t0 = performance.now(); bufKey = ''; terrain(); return performance.now() - t0; }
     };
   }
-  window.BLTerrain = { mount: mount, SIGMA_A: SIGMA_A, memberAir: memberAir, phase: phase, COLS: COLS, ROWS: ROWS, K: K, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF,  };
+  window.BLTerrain = { mount: mount, imageURL: imageURL, merc: merc, SIGMA_A: SIGMA_A, memberAir: memberAir, phase: phase, COLS: COLS, ROWS: ROWS, K: K, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF,  };
 })();
