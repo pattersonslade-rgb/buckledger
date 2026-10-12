@@ -1139,7 +1139,7 @@
     }
     h += '<div class="tiers">' +
       '<div class="tier' + (t === 'free' ? ' cur' : '') + '"><b>Free</b><span>' + plural(C.FREE_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.FREE_BUCK_LIMIT || 0, 'named buck') + ', ' + plural(C.FREE_PRED_LIMIT || 1, 'prediction') + '</span></div>' +
-      '<div class="tier' + (t === 'pro' ? ' cur' : '') + '"><b>Pro' + (priceOf('pro') ? ' · ' + esc(priceOf('pro')) : '') + '</b><span>' + plural(C.PRO_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.PRO_BUCK_LIMIT || 0, 'named buck') + ', ' + (C.PRO_OPEN_PRED_LIMIT || 5) + ' open predictions</span></div>' +
+      '<div class="tier' + (t === 'pro' ? ' cur' : '') + '"><b>Pro' + (priceOf('pro') ? ' · ' + esc(priceOf('pro')) : '') + '</b><span>' + plural(C.PRO_CAMERA_LIMIT || 0, 'camera') + ', ' + plural(C.PRO_BUCK_LIMIT || 0, 'named buck') + ', ' + (C.PRO_OPEN_PRED_LIMIT || 3) + ' open predictions</span></div>' +
       '<div class="tier' + (t === 'elite' ? ' cur' : '') + '"><b>Elite' + (priceOf('elite') ? ' · ' + esc(priceOf('elite')) : '') + '</b><span>Unlimited cameras, bucks &amp; predictions + 2D Movement Simulator + 3D Terrain Sim</span></div></div>' +
       '<p class="tiny muted" style="margin:6px 0 10px">' + esc(C.PRO_PRICE_NOTE || '') + '</p>';
     if (t === 'free') h += buyBtn('pro', 'Get Pro') + '<div style="height:8px"></div>' + buyBtn('elite', 'Get Elite');
@@ -1423,7 +1423,7 @@
     r.s = covered ? 'miss' : (Date.now() > end.getTime() ? 'waiting' : 'open');
     return r;
   }
-  function predLimit() { var t = tier(); return t === 'elite' ? null : t === 'pro' ? { kind: 'open', n: C.PRO_OPEN_PRED_LIMIT || 5 } : { kind: 'total', n: C.FREE_PRED_LIMIT || 1 }; }
+  function predLimit() { var t = tier(); return t === 'elite' ? null : t === 'pro' ? { kind: 'open', n: C.PRO_OPEN_PRED_LIMIT || 3 } : { kind: 'total', n: C.FREE_PRED_LIMIT || 1 }; }
   function canPredict() {
     var L = predLimit(); if (!L) return true;
     if (L.kind === 'total') return S.preds.length < L.n;

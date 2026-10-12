@@ -51,7 +51,7 @@ window.BUCKLEDGER_CONFIG = {
   PRO_CAMERA_LIMIT: 3,           // confirmed by Slade
   PRO_BUCK_LIMIT: 3,             // confirmed by Slade
   FREE_PRED_LIMIT: 1,            // Slade: Free = ONE prediction + ONE scored result
-  PRO_OPEN_PRED_LIMIT: 5,        // DECISION FOR SLADE: Pro = up to 5 open (unscored) predictions at a time; scored ones don't count
+  PRO_OPEN_PRED_LIMIT: 3,        // Set by Slade (Oct 12): Pro = up to 3 open (unscored) predictions at a time; scored ones don't count
 
   DEV_MODE: false,
   DEV_UNLOCK_CODE_SHA256: [
