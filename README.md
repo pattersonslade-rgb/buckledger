@@ -21,7 +21,7 @@ The Simulator (Elite) runs one engine (`terrain.js`) in the phone for the buyer'
 
 ## 3D view: the original sim, ported 1:1 (Oct 12, 2026)
 
-The Elite 3D view and both Example teasers now run the original sim renderer (`/workspace/hbk-sim/src/app.js`) in its own frame, `hbk3d/sim.html`. It's loaded only when the 3D view opens.
+The Elite 3D view and both Example teasers now run the original sim renderer (original source kept outside this repo) in its own frame, `hbk3d/sim.html`. It's loaded only when the 3D view opens.
 
 - **Source:** `buckledger-build/port/patch_app.py` copies the original source and makes only marked `BL:` swaps: data paths, names hidden, palette colors, tap-only labels, and the hooks for the layers below. `build.sh` bundles it with the same three.js (r160) as the original.
 - **Same as the original:** terrain mesh, aerial texture, shaders (terrain, mist, sky, clouds, cold front, particles), lighting and sun/moon/stars, camera, OrbitControls, views and fit poses, wind streaks, wind arrows, ground air, engine scent puffs, acorns and oaks, routes, crossings, visits, walk-ins, the setup lesson, the tour, and the day, view and key sheets with the time arc.

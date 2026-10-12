@@ -194,5 +194,5 @@ body.full #toast{bottom:auto;top:calc(56px + var(--safe-t))}
 #field-tips .tip{border-top:1px solid rgba(0,0,0,.12);padding:10px 0 4px}#field-tips h4{margin:0 0 4px;font-size:15px}#field-tips .tip p{margin:0 0 6px}#field-tips a{color:inherit}
 .t3-callout.tip{max-width:240px}.t3-callout.tip span{display:block}
 
-/* 3D view: the ported HBK sim in its own frame (phone-tall, same look as the original) */
+/* 3D view: the ported original sim in its own frame (phone-tall, same look as the original) */
 .t3-port{display:block;width:100%;height:min(86vh,900px);border:0;border-radius:14px;background:#0b1118}
