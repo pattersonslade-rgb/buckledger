@@ -646,6 +646,7 @@
   function render() {
     if (!S) return;
     R = parseHash();
+    if (!(R.view === 'sim' && R.q.v === '3d')) t3Day = null;
     if (simApi) { simApi.destroy(); simApi = null; }
     if (t3Api) { t3Api.destroy(); t3Api = null; }
     var v = VIEWS[R.view] || VIEWS.ledger, html;
@@ -1054,7 +1055,7 @@
 
   /* ---------------- Bucks ---------------- */
   VIEWS.bucks = function () {
-    var h = head('Your bucks');
+    var h = head('Your Bucks');
     h += '<div class="paper">';
     if (!S.deer.length) h += '<p class="muted" style="margin:0 0 10px">Name the bucks you recognize. Tag them in the Sort Pass and each one gets his own page: Day Ring, Season Strip and a plain-English read.</p>';
     var shown = visibleDeer(), hidden = S.deer.length - shown.length;
@@ -1178,7 +1179,7 @@
   var simApi = null;
   VIEWS.sim = function () {
     var is3 = R.q.v === '3d';
-    var h = head(is3 ? '3D Terrain Sim' : 'Movement Simulator') + '<div class="seg" id="sim-tabs"><a href="#/sim" class="' + (is3 ? '' : 'on') + '">2D map</a><a href="#/sim?v=3d" class="' + (is3 ? 'on' : '') + '" id="tab-3d">3D terrain</a></div>';
+    var h = head('Simulator') + '<div class="seg" id="sim-tabs" role="tablist" aria-label="Simulator view"><a href="#/sim" role="tab" id="tab-2d" aria-selected="' + !is3 + '"' + (is3 ? '' : ' class="on" aria-current="page"') + '>' + (is3 ? '' : '✓ ') + '2D map</a><a href="#/sim?v=3d" role="tab" id="tab-3d" aria-selected="' + is3 + '"' + (is3 ? ' class="on" aria-current="page"' : '') + '>' + (is3 ? '✓ ' : '') + '3D terrain</a></div>';
     if (is3) return h + sim3dHtml();
     if (!isElite()) {
       var t = tier();
@@ -1343,7 +1344,7 @@
   }
   VIEWS.states = function () {
     var D = SD(), keys = Object.keys(D).sort(function (a, b) { return D[a].name.localeCompare(D[b].name); });
-    var h = head('Your states', '#/more') + '<p class="muted small" style="margin-top:-4px">Pick where you hunt. You get rut timing and acorn info only for these states, from state wildlife agencies.</p>';
+    var h = head('Your States', '#/more') + '<p class="muted small" style="margin-top:-4px">Pick where you hunt. You get rut timing and acorn info only for these states, from state wildlife agencies.</p>';
     h += '<div class="paper" id="state-picker"><div class="stgrid">' + keys.map(function (ab) {
       var st = D[ab], on = S.settings.states.indexOf(ab) >= 0;
       return '<label class="stpick' + (on ? ' on' : '') + '"><input type="checkbox" data-state="' + ab + '"' + (on ? ' checked' : '') + '><b>' + esc(st.name) + '</b><span>' + (st.rut ? 'Rut ✓' : 'Rut: not yet') + ' · ' + (st.acorn ? 'Acorns ✓' : 'Acorns: not yet') + '</span></label>';
@@ -1359,7 +1360,7 @@
   function strengthTag(s) { return '<span class="ev ev-' + esc(s) + '">' + esc(s) + ' evidence</span>'; }
   function srcLinks(src) { return (src || []).map(function (x) { return '<a href="' + esc(x[1]) + '" target="_blank" rel="noopener">' + esc(x[0]) + '</a>'; }).join(' · '); }
   VIEWS.research = function () {
-    var D = SD(), M = (window.BL_STATES && window.BL_STATES.meta) || {}, h = head('Research for your states', '#/more');
+    var D = SD(), M = (window.BL_STATES && window.BL_STATES.meta) || {}, h = head('Research for Your States', '#/more');
     h += '<div class="panel small"><b>Your own cameras beat studies for a specific buck.</b> State numbers are averages over big areas and many deer. Use them as a backdrop; trust what your cameras show.</div>';
     if (!S.settings.states.length) return h + '<div class="paper"><p style="margin:0 0 10px">Pick your states first.</p><a class="btn go block" href="#/states">Pick states</a></div>';
     S.settings.states.forEach(function (ab) {
