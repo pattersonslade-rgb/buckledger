@@ -646,8 +646,9 @@
   function render() {
     if (!S) return;
     R = parseHash();
-    if (!(R.view === 'sim' && R.q.v === '3d')) t3Day = null;
+    if (R.view !== 'sim') t3Day = null;
     if (simApi) { simApi.destroy(); simApi = null; }
+    if (simDemo) { simDemo.destroy(); simDemo = null; }
     if (t3Api) { t3Api.destroy(); t3Api = null; }
     var v = VIEWS[R.view] || VIEWS.ledger, html;
     try { html = v(); } catch (e) { if (window.console) console.error(e); html = '<div class="panel">Something went wrong showing this screen. <a href="#/">Back to the Ledger</a></div>'; }
@@ -1175,36 +1176,80 @@
     return h + installNote();
   };
 
-  /* ---------------- Movement Simulator (Elite) ---------------- */
-  var simApi = null;
+  /* ---------------- Movement Simulator (Elite): 2D map + 3D terrain, one engine (terrain.js) ---------------- */
+  var simApi = null, simDemo = null;
+  var TEASER = '<p class="small">See your property the way a buck and the air see it. The wind and its wavering spread, warm air rising and cool air sinking on your real slopes, and your scent drifting out from each stand. Deer routes run from your bedding to your food. Every stand turns green, yellow or red with a plain reason, and it finds your safest walk-in from where you park. Pick a real day and slide through it hour by hour.</p>';
   VIEWS.sim = function () {
     var is3 = R.q.v === '3d';
     var h = head('Simulator') + '<div class="seg" id="sim-tabs" role="tablist" aria-label="Simulator view"><a href="#/sim" role="tab" id="tab-2d" aria-selected="' + !is3 + '"' + (is3 ? '' : ' class="on" aria-current="page"') + '>' + (is3 ? '' : '✓ ') + '2D map</a><a href="#/sim?v=3d" role="tab" id="tab-3d" aria-selected="' + is3 + '"' + (is3 ? ' class="on" aria-current="page"' : '') + '>' + (is3 ? '✓ ' : '') + '3D terrain</a></div>';
     if (is3) return h + sim3dHtml();
     if (!isElite()) {
       var t = tier();
-      return h + '<div class="paper" id="sim-locked"><h3>🔒 An Elite feature</h3>' +
-        '<p>Draw your property (bedding, food, water, creeks, funnels, roads, neighbor lines, stands) and watch where a buck is <i>likely</i> to move by hour. Slide time of day, season phase, wind, temperature and hunting pressure. A heat map and green/yellow/red stands update as you go, with a plain-language “why”.</p>' +
-        '<p class="small muted">Built from published whitetail GPS-collar research plus clearly labeled assumptions. It’s a thinking tool, not a forecast. Your map is saved on the phone and in your backups.</p>' +
+      return h + '<div class="paper" id="sim-locked"><h3>🔒 An Elite feature</h3>' + TEASER +
+        '<p class="small muted">A model to plan setups, not a forecast. Your map stays on this phone and in your backups.</p>' +
         (t === 'pro' ? buyBtn('upgrade', 'Upgrade to Elite') : buyBtn('elite', 'Get Elite')) +
-        (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more">I have a license key</a>' : '') + '</div>';
+        (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more">I have a license key</a>' : '') + '</div>' +
+        '<div class="paper"><h3>Try it on the Example property</h3><p class="tiny muted" style="margin:0 0 6px">Example property. Not your land.</p><div id="sim-demo"></div></div>';
     }
-    return h + '<div id="sim-root"></div>';
+    return h + (hasLoc() ? '' : '<p class="small" style="color:#9a2f1c">Add your property location (More → Property location) so sunrise, sunset and weather fit your land.</p>') + '<div id="sim-root"></div>';
   };
   VIEWS.sim.after = function () {
     if (R.q.v === '3d') { mount3d(); return; }
+    if (!isElite()) { var d = $('#sim-demo'); if (d && window.BLTerrain) simDemo = BLTerrain.mount(d, engineHost({ demo: true, flat: true })); return; }
     var el = $('#sim-root'); if (!el || !window.BuckSim) return;
     simApi = window.BuckSim.mount(el, {
       getMap: function () { return S.map; },
       saveMap: function (m) { S.map = window.BuckSim.clean(m); save(); },
       cameras: function () { return S.cameras.map(function (c) { return { id: c.id, name: c.name }; }); },
       toast: function (m) { toast(m); },
-      sun: function () { if (!hasLoc()) return null; var t = sunTimes(new Date(), S.settings.lat, S.settings.lng); if (!t || !t.rise || !t.set) return null; return { rise: t.rise.getHours() + t.rise.getMinutes() / 60, set: t.set.getHours() + t.set.getMinutes() / 60 }; },
-      visitCount: function (camId, h0, h1) {
-        return visits('bucks', camId).filter(function (v) { var hh = v.d.getHours() + v.d.getMinutes() / 60; return h0 < 0 ? (hh >= h0 + 24 || hh <= h1) : h1 >= 24 ? (hh >= h0 || hh <= h1 - 24) : (hh >= h0 && hh <= h1); }).length;
-      }
+      engineHost: function (map, exParking) { return engineHost({ flat: true, map: map, parking: exParking }); }
     });
   };
+  // Property clock: the hour on the slider is the property's own hour. With saved weather, Open-Meteo's instants
+  // (timezone picked from the property's spot) set it exactly; without, the phone's clock stands in.
+  function siteEntry(box, day, h) { return window.BLWx && BLWx.siteHour ? BLWx.siteHour(WX, box.lat, box.lng, ymdOf(day), h) : null; }
+  function siteAt(box, d) {
+    var c = WX['site:' + (window.BLWx ? BLWx.key(box.lat, box.lng) : '')] || {}, t = d.getTime(), hit = null;
+    Object.keys(c).forEach(function (k) { (c[k] || []).forEach(function (e) { if (e && e.e === t) hit = e; }); });
+    return hit;
+  }
+  var DEMO_BOX = { lat: 38, lng: -90 };   // made-up mid-US spot, only for sunrise/sunset on the Example property
+  function engineHost(o) {
+    o = o || {};
+    if (o.demo) {
+      var ex = window.BuckSim.example();
+      return {
+        demo: true, flat: !!o.flat, hour: 16, day: new Date(2026, 10, 8, 12), hasDem: function () { return true; },
+        dem: function () { return BLTerrain.exampleDem(); }, map: function () { return ex; }, box: function () { return { lat: DEMO_BOX.lat, lng: DEMO_BOX.lng, acres: ex.acres }; },
+        parking: function () { return window.BuckSim.exampleParking(); }, sunTimes: function (d) { return sunTimes(d, DEMO_BOX.lat, DEMO_BOX.lng); },
+        when: function (day, h) { return new Date(Date.UTC(day.getFullYear(), day.getMonth(), day.getDate(), h + 6)); },
+        air: function () { return null; }, manualAir: function () { return { wd: 225, ws: 6, cc: 20 }; },
+        airNote: function () { return '<p class="tiny muted" style="margin:4px 0">Demo air: light wind from the southwest, clear sky.</p>'; }
+      };
+    }
+    var map = o.map || S.map, flat = !!o.flat;
+    var box = (S.t3 && S.t3.box) || { lat: hasLoc() ? S.settings.lat : DEMO_BOX.lat, lng: hasLoc() ? S.settings.lng : DEMO_BOX.lng, acres: map ? map.acres : 160 };
+    if (flat && !(S.t3 && S.t3.box) && map) box = { lat: box.lat, lng: box.lng, acres: map.acres };
+    function demOK() { return !!(DEM && S.t3 && S.t3.box && DEM.key === demKey(S.t3.box)) && (!flat || !map || !map.example); }
+    return {
+      flat: flat, hour: new Date().getHours(), day: t3Day || new Date(), hasDem: function () { return !!(map && map.example) || demOK(); },
+      dem: function () { if (map && map.example) return BLTerrain.exampleDem(); return demOK() ? DEM.z : (flat ? new Float32Array(BLTerrain.NX * BLTerrain.NY) : null); },
+      map: function () { return map; }, box: function () { return box; },
+      parking: function () { return o.parking || (S.t3 && S.t3.parking) || []; }, sunTimes: function (d) { return sunTimes(d, box.lat, box.lng); },
+      when: function (day, h) { var e = siteEntry(box, day, h); return e ? new Date(e.e) : new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, 0, 0); },
+      air: function (d) { var h = siteAt(box, d); return h && h.wd !== null ? { wd: h.wd, ws: h.ws || 0, cc: h.cc, t: h.t } : null; },
+      manualAir: function () { return { wd: MANUAL_WIND.wd, ws: MANUAL_WIND.ws, cc: 30 }; },
+      airNote: function (d) {
+        var h = siteAt(box, d);
+        if (h && h.wd !== null) return '<p class="tiny muted" style="margin:4px 0">Real weather for this day (Open-Meteo), on the property’s own clock.</p>';
+        return '<div class="t3-manual"><p class="tiny muted" style="margin:4px 0">No weather saved for this day. <button class="btn sm ink" data-act="t3-wx">Get weather for this day</button> or pick the wind:</p>' +
+          '<div class="btn-row"><select id="t3-wd" aria-label="Wind from">' + C8L.map(function (n, i) { return '<option value="' + (i * 45) + '"' + (i * 45 === MANUAL_WIND.wd ? ' selected' : '') + '>From the ' + n + '</option>'; }).join('') + '</select>' +
+          '<select id="t3-ws" aria-label="Wind strength">' + WIND_WORDS.map(function (w) { return '<option value="' + w[1] + '"' + (w[1] === MANUAL_WIND.ws ? ' selected' : '') + '>' + w[0] + '</option>'; }).join('') + '</select></div></div>';
+      },
+      onDay: function (d) { t3Day = d; }
+    };
+  }
+  function engines() { return [t3Api, simApi && simApi.engine && simApi.engine()].filter(Boolean); }
 
   /* ================= v3: sun period, moon, weather, heading, bait, companions ================= */
   var WX = {};      // hourly weather cache (kv 'wx'). Re-fetchable, so it is NOT put in backups.
@@ -1515,32 +1560,7 @@
   }
   var MANUAL_WIND = { wd: 225, ws: 6 };
   var WIND_WORDS = [['Calm', 0], ['Light', 5], ['Breezy', 12], ['Windy', 20]];
-  function t3Host(demo) {
-    var exMap = window.BuckSim ? window.BuckSim.example() : null;
-    if (demo) return {
-      demo: true, hour: 17, day: new Date(2026, 10, 8, 12),
-      dem: function () { return BLTerrain.exampleDem(); }, map: function () { return exMap; }, box: function () { return { lat: 38, lng: -90, acres: 160 }; },
-      parking: function () { return [{ x: 1, y: 24 }]; }, sunTimes: function (d) { return sunTimes(d, 38, -90); },
-      air: function () { return null; }, manualAir: function () { return { wd: 225, ws: 6, cc: 20 }; },
-      airNote: function () { return '<p class="tiny muted" style="margin:4px 0">Demo air: light wind from the southwest, clear sky.</p>'; }
-    };
-    var box = S.t3.box;
-    return {
-      hour: new Date().getHours(), day: new Date(),
-      dem: function () { return DEM && DEM.key === demKey(box) ? DEM.z : null; }, map: function () { return S.map; }, box: function () { return box; },
-      parking: function () { return S.t3.parking; }, sunTimes: function (d) { return sunTimes(d, box.lat, box.lng); },
-      air: function (d) { var h = window.BLWx ? BLWx.hourAt(WX, box.lat, box.lng, d) : null; return h && h.wd !== null ? { wd: h.wd, ws: h.ws || 0, cc: h.cc, t: h.t } : null; },
-      manualAir: function () { return { wd: MANUAL_WIND.wd, ws: MANUAL_WIND.ws, cc: 30 }; },
-      airNote: function (d) {
-        var h = window.BLWx ? BLWx.hourAt(WX, box.lat, box.lng, d) : null;
-        if (h && h.wd !== null) return '<p class="tiny muted" style="margin:4px 0">Real weather for this day (Open-Meteo).</p>';
-        return '<div class="t3-manual"><p class="tiny muted" style="margin:4px 0">No weather saved for this day. <button class="btn sm ink" data-act="t3-wx">Get weather for this day</button> or pick the wind:</p>' +
-          '<div class="btn-row"><select id="t3-wd" aria-label="Wind from">' + C8L.map(function (n, i) { return '<option value="' + (i * 45) + '"' + (i * 45 === MANUAL_WIND.wd ? ' selected' : '') + '>From the ' + n + '</option>'; }).join('') + '</select>' +
-          '<select id="t3-ws" aria-label="Wind strength">' + WIND_WORDS.map(function (w) { return '<option value="' + w[1] + '"' + (w[1] === MANUAL_WIND.ws ? ' selected' : '') + '>' + w[0] + '</option>'; }).join('') + '</select></div></div>';
-      },
-      onDay: function (d) { t3Day = d; }
-    };
-  }
+  function t3Host(demo) { return engineHost({ demo: demo }); }
   var t3Day = null, t3Api = null;
   function parkSheet() {
     var m = S.map; if (!m) return;
@@ -1566,7 +1586,7 @@
       var t = tier();
       return '<div class="paper" id="t3-locked"><h3>🔒 3D Terrain Sim is Elite</h3><p class="small">Your real ground in 3D from USGS elevation, with wind, rising and sinking air and your moving scent. Stands turn green, yellow or red with a plain reason, and it finds your safest walk-in. Pick a real day and slide through it.</p>' +
         (t === 'pro' ? buyBtn('upgrade', 'Upgrade to Elite') : buyBtn('elite', 'Get Elite')) + (proOnSale() ? '<a class="btn ink block" style="margin-top:8px" href="#/more">I have a license key</a>' : '') + '</div>' +
-        '<div class="paper"><h3>Try the demo</h3><p class="tiny muted" style="margin:0 0 6px">Example property, made up. It is not a real place and not your land.</p><div id="t3-root"></div></div>';
+        '<div class="paper"><h3>Try it on the Example property</h3><p class="tiny muted" style="margin:0 0 6px">Example property. Not your land.</p><div id="t3-root"></div></div>';
     }
     var box = S.t3 && S.t3.box;
     if (!box) {
@@ -1579,7 +1599,7 @@
     var have = DEM && DEM.key === demKey(box);
     if (!have) return '<div class="paper" id="t3-fetch"><h3>Get your elevation</h3><p class="small">One download from USGS 3DEP for your box (about 70 KB). It is saved on this phone, so you only do this once. Only the box corners are sent.</p><button class="btn go block" data-act="t3-dem">Get USGS elevation</button><button class="btn ink block" style="margin-top:8px" data-act="t3-reset">Change the box</button></div>';
     return '<div id="t3-root"></div><div class="btn-row" style="margin-top:8px"><button class="btn ink" data-act="t3-park">Mark parking</button><a class="btn ink" href="#/sim">Edit 2D map</a><button class="btn ink" data-act="t3-reset">Change box</button></div>' +
-      '<p class="tiny muted">Model, not a promise. Wind under cover uses US Forest Service shelter factors; slope air uses published downslope and upslope speeds; scent spread uses textbook formulas (Turner stability, Briggs spread). Stands are rated only by whether your air blows over bedding, routes or food on the property (National Deer Association: keep your scent from blowing toward deer). Deer routes come from your own bedding and food marks.</p>';
+      '<p class="tiny muted">Model, not a forecast. The wind is run with its normal wavering spread for the hour (EPA stability classes). Wind under cover uses US Forest Service shelter factors; slope air uses published downslope and upslope speeds; scent spread uses textbook formulas (Turner stability, Briggs spread). Stands are rated only by whether your air blows over bedding, routes or food on the property (National Deer Association: keep your scent from blowing toward deer): red when the middle of the wind spread does, yellow when only its edges do. Deer routes are worked out in the phone from your own bedding and food marks.</p>';
   }
   function mount3d() {
     var el = $('#t3-root'); if (!el || !window.BLTerrain) return;
@@ -1588,7 +1608,7 @@
     if (t3Day && !demo) { var dt = el.querySelector('.t3-date'); if (dt) { dt.value = ymdOf(t3Day); dt.dispatchEvent(new Event('change', { bubbles: true })); } }
   }
   document.addEventListener('change', function (e) {
-    if (e.target && (e.target.id === 't3-wd' || e.target.id === 't3-ws')) { MANUAL_WIND.wd = Number($('#t3-wd').value); MANUAL_WIND.ws = Number($('#t3-ws').value); if (t3Api) t3Api.refresh(); }
+    if (e.target && (e.target.id === 't3-wd' || e.target.id === 't3-ws')) { MANUAL_WIND.wd = Number($('#t3-wd').value); MANUAL_WIND.ws = Number($('#t3-ws').value); engines().forEach(function (x) { x.refresh(); }); }
     if (e.target && e.target.getAttribute && e.target.getAttribute('data-state')) {
       var ab = e.target.getAttribute('data-state'), i = S.settings.states.indexOf(ab);
       if (e.target.checked && i < 0) S.settings.states.push(ab); else if (!e.target.checked && i >= 0) { S.settings.states.splice(i, 1); delete S.settings.areas[ab]; }
@@ -1905,8 +1925,12 @@
       case 't3-reset': confirmSheet('Change the box?', 'You’ll pick the size again and download the elevation again.', 'Change').then(function (ok) { if (ok) { S.t3 = null; save(); render(); } }); return;
       case 't3-park': parkSheet(); return;
       case 't3-wx': {
-        var bx = S.t3 && S.t3.box; if (!bx) return; var dd = t3Day || new Date(), d0 = new Date(dd.getTime() - DAYMS);
-        fetchWeatherFor([ymdOf(d0), ymdOf(dd)], bx.lat, bx.lng).then(function () { if (t3Api) t3Api.refresh(); }); return;
+        var bx = (S.t3 && S.t3.box) || (hasLoc() ? { lat: S.settings.lat, lng: S.settings.lng } : null); if (!bx) { toast('Add your property location first (More)'); return; }
+        var dd = t3Day || new Date(), d0 = new Date(dd.getTime() - DAYMS), d1 = new Date(dd.getTime() + DAYMS);
+        if (!navigator.onLine) { toast('No internet right now. Try again when you’re online.', 3500); return; }
+        toast('Getting weather…', 2500);
+        BLWx.fillSite(WX, bx.lat, bx.lng, ymdOf(d0), ymdOf(d1)).then(function () { wxSave(); toast('Weather saved'); engines().forEach(function (e) { e.refresh(); }); })
+          .catch(function () { toast('Couldn’t get the weather. Try again later.', 3500); }); return;
       }
       case 'install': if (deferredInstall) { deferredInstall.prompt(); deferredInstall = null; } return;
       case 'install-dismiss': S.settings.installDismissed = true; save(); var n = $('#install-note'); if (n) n.remove(); return;
@@ -1946,7 +1970,7 @@
     ready: ready, state: function () { return S; }, photos: function () { return P; },
     readExif: readExif, sunTimes: sunTimes, lightOf: function (d) { return lightOf(d); }, visits: function (s, c) { return visits(s || 'any', c); },
     plainRead: function (s) { return plainRead(visits(s)); }, flush: flush, isPro: function () { return isPro(); }, tier: function () { return tier(); }, sim: function () { return simApi; },
-    t3: function () { return t3Api; }, sha256: sha256, predStatus: function (id) { var p = S.preds.filter(function (x) { return x.id === id; })[0]; return p ? predStatus(p) : null; },
+    t3: function () { return t3Api; }, simDemo: function () { return simDemo; }, sha256: sha256, predStatus: function (id) { var p = S.preds.filter(function (x) { return x.id === id; })[0]; return p ? predStatus(p) : null; },
     predOk: function (id) { var p = S.preds.filter(function (x) { return x.id === id; })[0]; return p ? predOk(p) : null; }, idSuggest: function (pid) { return idSuggest(PI[pid]); },
     periodOf: function (d) { return periodOf(d); }, moonInfo: function (d) { return moonInfo(d); }, headingOf: function (pid) { return headingOf(PI[pid]); }, wx: function () { return WX; },
     dem: function () { return DEM; }, canPredict: function () { return canPredict(); }

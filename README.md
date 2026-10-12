@@ -10,4 +10,4 @@ v3 adds: state picker with rut/acorn/drought/crop info (`data/states.js`), sun +
 
 To launch paid tiers, fill the product IDs and checkout links in `config.js` (instructions at the top of that file), bump VERSION in `sw.js`, and push.
 
-The Movement Simulator (`sim.js`) is a simple relative-odds model built from published whitetail GPS-collar research plus labeled assumptions. It is not a forecast.
+The Simulator (Elite) runs one engine (`terrain.js`) in the phone for the buyer's own property, shown as a 2D map (`sim.js`, which also holds the map editor) or 3D terrain: USGS 3DEP elevation and Open-Meteo hourly weather on a tap (on the property's own clock), wind with its published wavering spread, slope air, scent, deer routes worked out from the buyer's bedding and food marks, green/yellow/red stands with plain reasons, and the safest walk-in. No numbers, graphs or trail-cam photos in the view. It is a model, not a forecast. The Example property (`data/example.js`) is a drawn layout with relative heights only.

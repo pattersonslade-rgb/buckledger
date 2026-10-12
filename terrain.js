@@ -78,7 +78,8 @@
   }
   // Example terrain for the demo: made up, smooth ridge + draw. NOT a real place.
   function exampleDem() {
-    var z = new Float32Array(NX * NY);
+    var z = new Float32Array(NX * NY), E = window.BL_EXAMPLE;
+    if (E && E.zdm && E.zdm.length === NX * NY) { for (var k = 0; k < NX * NY; k++) z[k] = E.zdm[k] / 10; return z; }
     for (var y = 0; y < NY; y++) for (var x = 0; x < NX; x++) {
       var u = x / NX, w = y / NY;
       z[y * NX + x] = 120 + 22 * Math.sin(u * 3.1 + 0.4) * Math.cos(w * 2.2) + 14 * Math.exp(-((u - 0.7) * (u - 0.7) + (w - 0.3) * (w - 0.3)) / 0.03) - 10 * Math.exp(-Math.pow(u - 0.35 - 0.1 * Math.sin(w * 6), 2) / 0.004) + 6 * w;
@@ -112,6 +113,22 @@
       case 5: return { sy: 0.06 * x * r, sz: 0.03 * x / (1 + 0.0003 * x) };
       default: return { sy: 0.04 * x * r, sz: 0.016 * x / (1 + 0.0003 * x) };
     }
+  }
+  /* Wind-direction spread by stability class. PUBLISHED: EPA-454/R-99-005 (Meteorological Monitoring Guidance for Regulatory
+     Modeling Applications) Table 6-9a, sigma-A ranges per class: A >= 22.5, B 17.5-22.5, C 12.5-17.5, D 7.5-12.5, E 3.8-7.5,
+     F < 3.8 degrees. The low edge of each range is used (F: its only published edge). The hour is run as a
+     small set of wind directions spread across that range (quantiles of a normal spread; the member count is a numerical
+     choice, never shown). */
+  var SIGMA_A = [0, 22.5, 17.5, 12.5, 7.5, 3.8, 3.8], NMEM = 5;
+  function normInv(p) { var a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239], b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572], q = p - 0.5, r = q * q; return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1); }
+  function memberAir(A) {   // central member first
+    var out = [A], sg = SIGMA_A[A.cls] || 7.5, k;
+    for (k = 0; k < NMEM; k++) {
+      var off = normInv((k + 0.5) / NMEM) * sg; if (Math.abs(off) < 1e-6) continue;
+      var c = Math.cos(off * D2R), s = Math.sin(off * D2R), B = {}; for (var key in A) B[key] = A[key];
+      B.tx = A.tx * c - A.ty * s; B.ty = A.tx * s + A.ty * c; B.off = off; out.push(B);
+    }
+    return out;
   }
   function chi(cls, x, u, H) { var s = briggs(cls, Math.max(x, 5)); return Math.exp(-H * H / (2 * s.sz * s.sz)) / (Math.PI * s.sy * s.sz * Math.max(u, 0.5)); }
   // No smell distance or threshold: no study gives one. The plume is the path your air takes (wind + cover + slope air)
@@ -206,10 +223,11 @@
   /* ---------- deer: where they likely are this hour ---------- */
   // Time of day (MSU P3927, direction only): the sunrise hour and sunset hour are the activity peaks (no peak width is
   // published, so only those hours count); daylight between; night outside. Without sun times: clock hour 6 / 18 as stand-ins.
+  // The sunrise hour = the hour on the slider that holds sunrise (same for sunset). No minute window is used.
   function phase(date, rise, set) {
-    var t = date.getTime(), r = rise ? rise.getTime() : new Date(date).setHours(6, 0, 0, 0), s = set ? set.getTime() : new Date(date).setHours(18, 0, 0, 0), H = 30 * 6e4;
-    if (Math.abs(t - r) <= H) return 'morning';
-    if (Math.abs(t - s) <= H) return 'evening';
+    var t = date.getTime(), r = rise ? rise.getTime() : new Date(date).setHours(6, 0, 0, 0), s = set ? set.getTime() : new Date(date).setHours(18, 0, 0, 0), HR = 36e5;
+    if (r >= t && r < t + HR) return 'morning';
+    if (s >= t && s < t + HR) return 'evening';
     return t > r && t < s ? 'midday' : 'night';
   }
   // Active deer areas by phase (MSU P3927, direction only): night = food + routes; sunrise / sunset hour = bedding, routes,
@@ -259,58 +277,84 @@
     return out;
   }
 
-  /* ---------- the whole hour ---------- */
+  /* ---------- the whole hour (run in the phone for any property) ---------- */
+  function cellHit(map, onRoute, deer, j) {
+    var z = zoneAt(map, j % NX, (j / NX) | 0), area = z === 'B' || z === 'F' || onRoute[j];
+    return area ? (deer[j] ? (z === 'B' ? 'B' : z === 'F' ? 'F' : 'R') : 'q') : '';
+  }
+  // Follow one member's air from the stand until it leaves the property box. Returns what it crosses, in order.
+  function memberPath(T, A, x0, y0, deer, onRoute) {
+    var pts = trace(T.F, A, x0, y0, 1e9), first = '', quiet = false, inside = 0, outside = 0, exit = null;
+    for (var k = 0; k < pts.length; k++) {
+      var p = pts[k], j = clamp(Math.round(p.y), 0, NY - 1) * NX + clamp(Math.round(p.x), 0, NX - 1), z = zoneAt(T.map, j % NX, (j / NX) | 0);
+      if (z === 'X') { outside++; if (!exit) exit = p; continue; }
+      inside++;
+      // sideways spread: one Briggs sigma-y each side of the path (textbook plume core)
+      var sy = briggs(A.cls, Math.max(p.d, 5)).sy, steps = Math.max(1, Math.ceil(sy / T.F.dx));
+      for (var q = -steps; q <= steps; q++) {
+        var X = Math.round(p.x + p.nx * q * sy / steps / T.F.dx), Y = Math.round(p.y + p.ny * q * sy / steps / T.F.dy);
+        if (X < 0 || Y < 0 || X >= NX || Y >= NY) continue;
+        var h = cellHit(T.map, onRoute, deer, Y * NX + X);
+        if (h === 'q') quiet = true; else if (h && !first) first = h;
+      }
+    }
+    if (!exit && pts.length) exit = pts[pts.length - 1];
+    return { pts: pts, hit: first, quiet: quiet, inside: inside, outside: outside, exit: exit };
+  }
   function model(T, air, date) {
-    var map = T.map, F = T.F, A = airAt(air, date, T.lat, T.lng, T.rise, T.set), ph = phase(date, T.rise, T.set), W = ACTIVE[ph];
+    var map = T.map, A = airAt(air, date, T.lat, T.lng, T.rise, T.set), ph = phase(date, T.rise, T.set), W = ACTIVE[ph];
     var deer = new Float32Array(NX * NY), onRoute = new Uint8Array(NX * NY);
     T.routes.forEach(function (r) { r.forEach(function (i) { for (var oy = -1; oy <= 1; oy++) for (var ox = -1; ox <= 1; ox++) { var x = i % NX + ox, y = ((i / NX) | 0) + oy; if (x >= 0 && y >= 0 && x < NX && y < NY) onRoute[y * NX + x] = 1; } }); });
     for (var i = 0; i < NX * NY; i++) { var z = zoneAt(map, i % NX, (i / NX) | 0); deer[i] = ((z === 'B' && W.B) || (z === 'F' && W.F) || (onRoute[i] && W.R)) ? 1 : 0; }
+    var mem = memberAir(A);
     var stands = (map.stands || []).map(function (s) {
-      var x0 = s.x * K + K / 2, y0 = s.y * K + K / 2, P = plume(F, A, x0, y0, 6), now = 0, quiet = 0, hitB = 0, hitR = 0, hitF = 0;
-      for (var j = 0; j < NX * NY; j++) {
-        if (!P.g[j]) continue;
-        var z = zoneAt(map, j % NX, (j / NX) | 0), area = z === 'B' || z === 'F' || onRoute[j];
-        if (!area) continue;
-        if (deer[j]) { now++; if (z === 'B') hitB++; else if (z === 'F') hitF++; else hitR++; } else quiet++;
-      }
-      // red: crosses a deer area where deer likely are this hour; yellow: crosses deer areas that are likely quiet now,
-      // or the air is calm / switching so its path can't be trusted; green: crosses no deer area on the property
-      var color = now ? 'red' : (quiet || A.calm || A.mode === 'mixed') ? 'yellow' : 'green';
-      return { name: s.name, x: x0, y: y0, plume: P, color: color, hitB: hitB, hitR: hitR, hitF: hitF, quiet: quiet };
+      var x0 = s.x * K + K / 2, y0 = s.y * K + K / 2, runs = mem.map(function (B) { return memberPath(T, B, x0, y0, deer, onRoute); });
+      var c = runs[0], anyHit = runs.filter(function (r) { return r.hit; })[0];
+      // RANKED RULE (no cutoff number): red = the middle of the wind spread carries your air over an active deer area;
+      // yellow = only the edges of the spread do, or it crosses deer areas that are quiet this hour, or the air is calm or
+      // turning over; green = no part of the spread touches a deer area on the property.
+      var color = c.hit ? 'red' : (anyHit || runs.some(function (r) { return r.quiet; }) || A.calm || A.mode === 'mixed') ? 'yellow' : 'green';
+      var hit = c.hit || (anyHit && anyHit.hit) || '';
+      var off = c.outside > c.inside;   // more of the middle path is off the property than on it (a comparison, no share number)
+      var g = new Float32Array(NX * NY);
+      runs.forEach(function (r, m) { r.pts.forEach(function (p) { var sy = briggs(A.cls, Math.max(p.d, 5)).sy, steps = Math.max(1, Math.ceil(sy / T.F.dx)); for (var q = -steps; q <= steps; q++) { var off2 = q * sy / steps, X = Math.round(p.x + p.nx * off2 / T.F.dx), Y = Math.round(p.y + p.ny * off2 / T.F.dy); if (X < 0 || Y < 0 || X >= NX || Y >= NY) continue; var v = Math.exp(-off2 * off2 / (2 * sy * sy)) * (m ? 0.6 : 1); if (v > g[Y * NX + X]) g[Y * NX + X] = v; } }); });
+      return { name: s.name, x: x0, y: y0, plume: { g: g, pts: c.pts }, members: runs.map(function (r) { return r.pts; }), color: color, hit: hit, edgeOnly: !c.hit && !!anyHit, quiet: runs.some(function (r) { return r.quiet; }), off: off, exit: c.exit,
+        hitB: hit === 'B' ? 1 : 0, hitR: hit === 'R' ? 1 : 0, hitF: hit === 'F' ? 1 : 0 };
     });
-    return { A: A, phase: ph, deer: deer, onRoute: onRoute, stands: stands };
+    return { A: A, phase: ph, deer: deer, onRoute: onRoute, stands: stands, mem: mem };
   }
-  // safest walk-in from the closest parking spot to a stand
+  // safest walk-in from the closest parking spot to a stand (rank order only: clean air first, then stay out of deer
+  // areas and off the neighbor line, then shortest). Uses the whole wind spread, like the stands.
   function walkIn(T, M, s) {
     if (!T.parking.length) return null;
-    var F = T.F, A = M.A, cost = new Float32Array(NX * NY);
-    // exposure: does the air from this spot cross a deer area anywhere on the property?
+    var F = T.F, cost = new Float32Array(NX * NY);
     for (var y = 0; y < NY; y += 2) for (var x = 0; x < NX; x += 2) {
-      var pts = trace(F, A, x, y, 1e9), bad = 0;
-      for (var k = 0; k < pts.length; k += 2) { var j = Math.round(pts[k].y) * NX + Math.round(pts[k].x); if (M.deer[j]) { bad = 1; break; } }
+      var bad = 0;
+      for (var m = 0; m < M.mem.length && !bad; m++) { var pts = trace(F, M.mem[m], x, y, 1e9); for (var k = 0; k < pts.length; k += 2) { var j = Math.round(pts[k].y) * NX + Math.round(pts[k].x); if (M.deer[j]) { bad = m === 0 ? 2 : 1; break; } } }
       for (var oy = 0; oy < 2; oy++) for (var ox = 0; ox < 2; ox++) if (y + oy < NY && x + ox < NX) cost[(y + oy) * NX + x + ox] = bad;
     }
     for (var i = 0; i < NX * NY; i++) {
       var z = zoneAt(T.map, i % NX, (i / NX) | 0);
-      // rank order only: first avoid spots whose air crosses active deer areas, then avoid walking through deer areas or
-      // the neighbor line, then shortest. Tier sizes only keep ranks apart; no deer data.
-      cost[i] = cost[i] ? 1e10 : (M.deer[i] || z === 'B' || z === 'X') ? 1e5 : 1;
+      cost[i] = cost[i] === 2 ? 1e15 : cost[i] === 1 ? 1e10 : (M.deer[i] || z === 'B' || z === 'X') ? 1e5 : 1;   // tier sizes only keep ranks apart
     }
     var goal = clamp(Math.round(s.y), 0, NY - 1) * NX + clamp(Math.round(s.x), 0, NX - 1), D = dijkstra(cost, [goal]), best = null;
-    T.parking.forEach(function (p) { var j = clamp(p.y * K + 2, 0, NY - 1) * NX + clamp(p.x * K + 2, 0, NX - 1); if (!best || D.dist[j] < D.dist[best]) best = j; });
+    T.parking.forEach(function (p) { var j = clamp(p.y * K + 2, 0, NY - 1) * NX + clamp(p.x * K + 2, 0, NX - 1); if (best === null || D.dist[j] < D.dist[best]) best = j; });
     var path = [], i2 = best, exposed = 0, crosses = 0;
     for (var g = 0; i2 >= 0 && g < 5000; g++) { path.push(i2); if (cost[i2] >= 1e10) exposed++; if (M.onRoute[i2]) crosses++; i2 = D.prev[i2]; }
     return { path: path, exposed: exposed, crosses: crosses, from: best };
   }
   var DIR8 = ['north', 'northeast', 'east', 'southeast', 'south', 'southwest', 'west', 'northwest'];
   function dirWord(dx, dy) { var a = (Math.atan2(dx, -dy) / D2R + 360) % 360; return DIR8[Math.round(a / 45) % 8]; }
+  var HITW = { B: 'bedding', R: 'a deer route', F: 'the food' };
   function reasons(T, M, s, w) {
     var A = M.A, out = [], wind = A.calm ? 'Calm, shifting air' : 'Wind from the ' + DIR8[Math.round(((A.tx === 0 && A.ty === 0) ? 0 : ((Math.atan2(-A.tx, A.ty) / D2R) + 360) % 360) / 45) % 8];
     out.push(wind + (A.mode === 'down' ? ', and cooling air is sinking downhill.' : A.mode === 'up' ? ', and warming air is rising uphill.' : ', and the air is switching between rising and sinking.'));
-    if (s.color === 'red') out.push('Your air blows over ' + (s.hitB ? 'bedding' : s.hitR ? 'a deer route' : 'the food') + ' where deer should be now. Skip this stand this hour.');
-    else if (s.color === 'yellow') out.push(A.calm ? 'With almost no wind, your air has no steady path and can swirl.' : A.mode === 'mixed' ? 'In the hour after sunrise the air is turning over from downhill to uphill. Scent may swirl.' : 'Your air crosses deer areas that are likely quiet this hour. Hunt it with care.');
-    else out.push('Your air does not blow over bedding, food or the routes on the property this hour.');
+    if (s.color === 'red') out.push('Your air blows straight over ' + HITW[s.hit] + ' where deer should be now. Skip this stand this hour.');
+    else if (s.color === 'yellow') out.push(A.calm ? 'With almost no wind, your air has no steady path and can swirl.' : A.mode === 'mixed' ? 'Right after sunrise the air is turning over from downhill to uphill. Scent may swirl.' : s.edgeOnly ? 'Your air mostly misses deer, but when the wind wavers it can drift over ' + HITW[s.hit] + '. Hunt it with care.' : 'Your air crosses deer areas that are likely quiet this hour. Hunt it with care.');
+    else out.push('Your air does not blow over bedding, food or the routes on the property this hour, even when the wind wavers.');
+    if (s.off && s.exit) out.push('Most of your scent blows ' + dirWord(s.exit.x - s.x, s.exit.y - s.y) + ' off the property.');
     if (A.mode === 'down' && s.color !== 'green') out.push('Cold air drains into low ground and carries scent with it.');
+    if (!T.hasDem) out.push('No elevation loaded yet, so rising and sinking air is left out. Get USGS elevation on the terrain tab to add it.');
     if (w === null) out.push('Mark where you park to get a walk-in.');
     else if (w) {
       var p = w.from, dx = (p % NX) - s.x, dy = ((p / NX) | 0) - s.y;
@@ -323,13 +367,13 @@
   /* ---------- rendering (painter's algorithm) ---------- */
   var ZCOL = { B: [52, 92, 46], F: [196, 168, 78], W: [70, 128, 170], C: [64, 118, 160], N: [120, 140, 70], R: [150, 140, 128], X: [150, 80, 70], '.': [104, 128, 76] };
   function mount(el, host) {
-    var T = null, view = { yaw: -0.5, pitch: 0.95 }, hour = host.hour == null ? 17 : host.hour, day = host.day || new Date(), sel = 0, M = null, W = null, raf = 0, parts = [], dead = false, buf = null, bufKey = '';
+    var flat = !!host.flat, T = null, view = flat ? { yaw: 0, pitch: Math.PI / 2 } : { yaw: -0.5, pitch: 0.95 }, hour = host.hour == null ? 17 : host.hour, day = host.day || new Date(), sel = 0, M = null, W = null, raf = 0, parts = [], dead = false, buf = null, bufKey = '';
     var demo = !!host.demo;
-    el.innerHTML = '<div class="t3">' + (demo ? '<div class="t3-demo">Demo on a made-up example property. Not a real place.</div>' : '') +
-      '<div class="t3-stage"><canvas class="t3-cv" aria-label="3D terrain view"></canvas><div class="t3-phase" aria-live="polite"></div></div>' +
+    el.innerHTML = '<div class="t3">' + (demo ? '<div class="t3-demo">Example property. Not your land.</div>' : '') +
+      '<div class="t3-stage"><canvas class="t3-cv" aria-label="' + (flat ? '2D map view' : '3D terrain view') + '"></canvas><div class="t3-phase" aria-live="polite"></div></div>' +
       '<div class="t3-ctl"><label class="t3-scrub"><span class="t3-when"></span><input type="range" min="0" max="23" step="1" class="t3-hour" aria-label="Time of day"></label>' +
       '<div class="t3-row">' + (demo ? '' : '<label class="field t3-day"><span>Day</span><input type="date" class="t3-date"></label>') +
-      '<button class="btn sm ink" data-t3="turn">Turn</button><button class="btn sm ink" data-t3="top">Top view</button></div>' +
+      (flat ? '' : '<button class="btn sm ink" data-t3="turn">Turn</button><button class="btn sm ink" data-t3="top">Top view</button>') + '</div>' +
       '<div class="t3-air"></div><div class="t3-stands"></div><ul class="t3-why read"></ul></div></div>';
     var cv = el.querySelector('canvas'), g = cv.getContext('2d'), hr = el.querySelector('.t3-hour'), dt = el.querySelector('.t3-date');
     hr.value = hour; if (dt) dt.value = ymd(day);
@@ -340,20 +384,20 @@
       var b = bbox(box), F = fields(z, b.wm, b.hm), st = host.sunTimes(day);
       F.zone = []; for (var zi = 0; zi < NX * NY; zi++) F.zone.push(zoneAt(map, zi % NX, (zi / NX) | 0));
       F.run = Math.hypot(b.wm, b.hm);   // slope length: the property's span (ESTIMATE; slopes may run past the box)
-      T = { z: z, map: map, F: F, lat: box.lat, lng: box.lng, wm: b.wm, hm: b.hm, rise: st && st.rise, set: st && st.set, parking: host.parking() || [] };
+      T = { z: z, map: map, F: F, lat: box.lat, lng: box.lng, wm: b.wm, hm: b.hm, rise: st && st.rise, set: st && st.set, parking: host.parking() || [], hasDem: host.hasDem ? !!host.hasDem() : true };
       T.routes = routes(map, F);
+      // a route is drawn solid where it runs through a map square that has one of your cameras (seen on camera), dashed elsewhere
+      var camSq = {}; (map.cams || []).forEach(function (c) { camSq[c.y * COLS + c.x] = 1; });
+      T.routeCam = T.routes.map(function (r) { return r.map(function (i) { return camSq[(((i / NX) | 0) / K | 0) * COLS + ((i % NX) / K | 0)] ? 1 : 0; }); });
       var rel = Math.max(F.max - F.min, 1); T.ex = clamp(0.16 * b.wm / rel, 1, 6);
       bufKey = '';
     }
-    function when(h) {
-      var d = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, 0, 0);
-      return d;
-    }
+    // the slider is the property's own clock (host.when maps day + hour in the property's time zone to a real instant)
+    function when(h) { return host.when ? host.when(day, h) : new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, 0, 0); }
     function hourWord(d) {
-      var p = phase(d, T && T.rise, T && T.set), t = d.getTime(), r = T && T.rise, s = T && T.set;
-      if (r && Math.abs(t - r.getTime()) <= 40 * 6e4) return 'Around sunrise';
-      if (s && Math.abs(t - s.getTime()) <= 40 * 6e4) return 'Around sunset';
-      var h = d.getHours();
+      var p = phase(d, T && T.rise, T && T.set), h = hour;
+      if (p === 'morning') return 'Sunrise hour';
+      if (p === 'evening') return 'Sunset hour';
       return p === 'night' ? (h < 12 ? 'Before dawn' : 'After dark') : p === 'morning' ? 'Early morning' : p === 'midday' ? (h < 12 ? 'Late morning' : 'Midday') : 'Late afternoon';
     }
     function compute() {
@@ -398,17 +442,31 @@
       quads.sort(function (a, c) { return a.d - c.d; });
       quads.forEach(function (q) { b.beginPath(); b.moveTo(q.p[0][0], q.p[0][1]); for (var k = 1; k < 4; k++) b.lineTo(q.p[k][0], q.p[k][1]); b.closePath(); b.fillStyle = q.c; b.fill(); b.strokeStyle = q.c; b.lineWidth = 0.6; b.stroke(); });
     }
-    function seed() { parts = []; if (!M || !M.stands[sel]) return; var s = M.stands[sel]; for (var k = 0; k < 90; k++) parts.push({ x: s.x, y: s.y, age: Math.random() * 120 }); }
+    function seed() { parts = []; if (!M || !M.stands[sel]) return; var s = M.stands[sel]; for (var k = 0; k < 120; k++) parts.push({ x: s.x, y: s.y, age: Math.random() * 120, m: k % M.mem.length }); }
     function frame(ts) {
       if (dead) return;
       if (!T) { g.clearRect(0, 0, S.w, S.h); return; }
       terrain(); g.clearRect(0, 0, S.w, S.h); g.drawImage(buf, 0, 0, S.w, S.h);
       var t = (ts || 0) / 1000;
+      // air arrows: where the air near the ground moves (wind under cover + slope air); blue = sinking, orange = rising
+      if (M) {
+        var stp = flat ? 8 : 10, ph2 = (t * 0.6) % 1;
+        for (var ay = stp / 2; ay < NY; ay += stp) for (var ax = stp / 2; ax < NX; ax += stp) {
+          var ai = ay * NX + ax, v = flowAt(T.F, M.A, ai), vs = Math.sqrt(v[0] * v[0] + v[1] * v[1]); if (vs < 0.05) continue;
+          var L2 = stp * 0.42, bx = ax - v[0] / vs * L2 * (0.5 - ph2), by = ay - v[1] / vs * L2 * (0.5 - ph2);
+          var p0 = proj(bx - v[0] / vs * L2 / 2, by - v[1] / vs * L2 / 2, zAt(bx, by) + 4), p1 = proj(bx + v[0] / vs * L2 / 2, by + v[1] / vs * L2 / 2, zAt(bx, by) + 4), an = Math.atan2(p1[1] - p0[1], p1[0] - p0[0]);
+          g.strokeStyle = M.A.mode === 'down' ? 'rgba(140,190,255,.8)' : M.A.mode === 'up' ? 'rgba(255,190,120,.8)' : 'rgba(235,235,235,.75)'; g.lineWidth = 1.6;
+          g.beginPath(); g.moveTo(p0[0], p0[1]); g.lineTo(p1[0], p1[1]); g.stroke();
+          g.save(); g.translate(p1[0], p1[1]); g.rotate(an); g.fillStyle = g.strokeStyle; g.beginPath(); g.moveTo(4, 0); g.lineTo(-3, -3); g.lineTo(-3, 3); g.closePath(); g.fill(); g.restore();
+        }
+      }
       // deer routes: moving arrows (bed -> food in the evening and night, food -> bed in the morning)
       if (M) T.routes.forEach(function (r) {
         var rev = M.phase === 'morning' || M.phase === 'midday', pts = rev ? r.slice().reverse() : r, a = M.phase === 'midday' ? 0.35 : 0.95;
-        g.strokeStyle = 'rgba(255,248,225,' + (a * 0.5) + ')'; g.lineWidth = 2; g.beginPath();
-        pts.forEach(function (i, k) { var p = proj(i % NX, (i / NX) | 0, T.z[i] + 2); if (k) g.lineTo(p[0], p[1]); else g.moveTo(p[0], p[1]); }); g.stroke();
+        var cam = T.routeCam[T.routes.indexOf(r)] || [], camPts = rev ? cam.slice().reverse() : cam;
+        g.strokeStyle = 'rgba(255,248,225,' + (a * 0.55) + ')'; g.lineWidth = 2;
+        for (var q = 1; q < pts.length; q++) { var pa = proj(pts[q - 1] % NX, (pts[q - 1] / NX) | 0, T.z[pts[q - 1]] + 2), pb = proj(pts[q] % NX, (pts[q] / NX) | 0, T.z[pts[q]] + 2); g.setLineDash(camPts[q] ? [] : [4, 4]); g.beginPath(); g.moveTo(pa[0], pa[1]); g.lineTo(pb[0], pb[1]); g.stroke(); }
+        g.setLineDash([]);
         var gap = 9, off = Math.floor(t * 6) % gap;
         for (var k = off; k + 2 < pts.length; k += gap) {
           var i0 = pts[k], i1 = pts[k + 2], p0 = proj(i0 % NX, (i0 / NX) | 0, T.z[i0] + 2), p1 = proj(i1 % NX, (i1 / NX) | 0, T.z[i1] + 2), ang = Math.atan2(p1[1] - p0[1], p1[0] - p0[0]);
@@ -418,7 +476,7 @@
       // moving scent from the picked stand
       if (M && M.stands[sel]) {
         parts.forEach(function (p) {
-          var i = clamp(Math.round(p.y), 0, NY - 1) * NX + clamp(Math.round(p.x), 0, NX - 1), v = flowAt(T.F, M.A, i), sp = Math.sqrt(v[0] * v[0] + v[1] * v[1]) || 1;
+          var i = clamp(Math.round(p.y), 0, NY - 1) * NX + clamp(Math.round(p.x), 0, NX - 1), v = flowAt(T.F, M.mem[p.m] || M.A, i), sp = Math.sqrt(v[0] * v[0] + v[1] * v[1]) || 1;
           var jit = M.A.calm ? 1.2 : M.A.mode === 'mixed' ? 0.6 : 0.25;   // DISPLAY ONLY: arrow wobble
           p.x += v[0] / sp * 0.45 + (Math.random() - 0.5) * jit; p.y += v[1] / sp * 0.45 + (Math.random() - 0.5) * jit; p.age++;
           if (p.age > 140 || p.x < 0 || p.y < 0 || p.x >= NX || p.y >= NY) { p.x = M.stands[sel].x; p.y = M.stands[sel].y; p.age = 0; }
@@ -471,10 +529,10 @@
     return {
       destroy: function () { dead = true; cancelAnimationFrame(raf); window.removeEventListener('resize', onResize); },
       refresh: function () { setup(); compute(); },
-      state: function () { return M ? { phase: M.phase, mode: M.A.mode, cls: M.A.cls, calm: M.A.calm, stands: M.stands.map(function (s) { return { name: s.name, color: s.color, hitB: s.hitB, hitR: s.hitR, quiet: s.quiet }; }), routes: T.routes.length, walk: W ? { len: W.path.length, exposed: W.exposed } : W, why: Array.prototype.map.call(el.querySelectorAll('.t3-why li'), function (l) { return l.textContent; }) } : null; },
+      state: function () { return M ? { phase: M.phase, mode: M.A.mode, cls: M.A.cls, calm: M.A.calm, stands: M.stands.map(function (s) { return { name: s.name, color: s.color, hitB: s.hitB, hitR: s.hitR, quiet: s.quiet, edgeOnly: s.edgeOnly, off: s.off }; }), members: M.mem.length, flat: flat, hasDem: T.hasDem, when: when(hour).toISOString(), routeCam: T.routeCam.map(function (r) { return r.some(Boolean); }), routes: T.routes.length, walk: W ? { len: W.path.length, exposed: W.exposed } : W, why: Array.prototype.map.call(el.querySelectorAll('.t3-why li'), function (l) { return l.textContent; }) } : null; },
       setHour: function (h) { hour = h; hr.value = h; compute(); }, setSel: function (k) { sel = k; compute(); },
       renderMs: function () { var t0 = performance.now(); bufKey = ''; terrain(); return performance.now() - t0; }
     };
   }
-  window.BLTerrain = { mount: mount, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF,  };
+  window.BLTerrain = { mount: mount, SIGMA_A: SIGMA_A, memberAir: memberAir, phase: phase, COLS: COLS, ROWS: ROWS, K: K, bbox: bbox, demURL: demURL, parseTiff: parseTiff, cleanDem: cleanDem, exampleDem: exampleDem, stability: stability, briggs: briggs, chi: chi, sunElev: sunElev, NX: NX, NY: NY, _model: model, _fields: fields, _routes: routes, underCover: underCover, slopeFlow: slopeFlow, WAF: WAF,  };
 })();
