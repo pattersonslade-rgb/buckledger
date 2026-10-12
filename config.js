@@ -9,7 +9,7 @@
  *   Elite Upgrade : Pro owners pay the difference (UPGRADE_PRICE). Its key only unlocks Elite on a phone
  *                   that already holds a valid Pro key; both keys are re-checked with Gumroad.
  *
- * >>> ALL PRODUCT IDS AND CHECKOUT LINKS ARE EMPTY ON PURPOSE. NOT SET YET. NEVER GUESS THEM. <<<
+ * Option A is live: product 4n-1sk-GKau8qkWiclOoIQ== (mfuuir). Option B ids stay empty.
  *   While empty, the app runs in Free mode and the buy buttons say "coming soon". Nothing breaks.
  *
  * OPTION A (recommended): ONE Gumroad product with three versions named exactly
@@ -32,16 +32,16 @@ window.BUCKLEDGER_CONFIG = {
   PRO_PRICE_NOTE: "One-time purchase. No subscription.",
 
   // Option A: one product with versions "Pro", "Elite", "Elite Upgrade"
-  GUMROAD_PRODUCT_ID: "",        // <<< SET THIS (from Gumroad). Do not guess.
-  CHECKOUT_URL: "",              // <<< SET THIS: the product link, e.g. https://sladepatterson.gumroad.com/l/xxxxx
+  GUMROAD_PRODUCT_ID: "4n-1sk-GKau8qkWiclOoIQ==", // Buck Ledger (permalink mfuuir), confirmed on the live Gumroad page
+  CHECKOUT_URL: "https://sladepatterson.gumroad.com/l/mfuuir",
 
   // Option B (fallback): separate products. Leave empty if you use Option A.
   PRO_PRODUCT_ID: "",            // <<< not set
   ELITE_PRODUCT_ID: "",          // <<< not set
   UPGRADE_PRODUCT_ID: "",        // <<< not set
-  PRO_CHECKOUT_URL: "",          // <<< not set (Option A: optional direct link to the Pro version)
-  ELITE_CHECKOUT_URL: "",        // <<< not set
-  UPGRADE_CHECKOUT_URL: "",      // <<< not set
+  PRO_CHECKOUT_URL: "https://sladepatterson.gumroad.com/l/mfuuir?option=I6o9eu1FCWosy08bqXWHMw%3D%3D",     // preselects version "Pro"
+  ELITE_CHECKOUT_URL: "https://sladepatterson.gumroad.com/l/mfuuir?option=Nvn3BmaqeQ7cwvslu8_YWQ%3D%3D",   // preselects version "Elite"
+  UPGRADE_CHECKOUT_URL: "https://sladepatterson.gumroad.com/l/mfuuir?option=GUKWGkahR2DNUluPySooYg%3D%3D", // preselects version "Elite Upgrade"
 
   LICENSE_VERIFY_URL: "https://api.gumroad.com/v2/licenses/verify", // Gumroad allows browser (CORS) calls
   MAX_ACTIVATIONS: 5,
