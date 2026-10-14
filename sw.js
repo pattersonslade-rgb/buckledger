@@ -1,12 +1,12 @@
 /* Buck Ledger service worker: caches the app files on the phone.
  * Bump VERSION whenever you publish changes. */
-var VERSION = 'buckledger-v3.4.3';
+var VERSION = 'buckledger-v3.4.4';
 var ASSETS = [
   './', 'index.html', 'styles.css', 'app.js', 'sim.js', 'terrain.js', 'astro.js', 'wx.js', 'ocr.js', 'data/states.js', 'data/example.js', 'fieldtips.js', 'config.js', 'manifest.webmanifest', 'privacy.html',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png', 'icons/favicon-32.png'
 ];
 self.addEventListener('install', function (e) {
-  e.waitUntil(caches.open(VERSION).then(function (c) { return c.addAll(ASSETS); }).then(function () { return self.skipWaiting(); }));
+  e.waitUntil(caches.open(VERSION).then(function (c) { return c.addAll(ASSETS.map(function (u) { return new Request(u, { cache: 'reload' }); })); }).then(function () { return self.skipWaiting(); }));
 });
 self.addEventListener('activate', function (e) {
   e.waitUntil(caches.keys().then(function (keys) {
